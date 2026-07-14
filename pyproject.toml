@@ -30,3 +30,5 @@ testpaths = ["tests"]
 
 [tool.pyright]
 typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

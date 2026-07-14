@@ -20,12 +20,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from ..provider import BaseAdapter
+from ..provider import BaseAdapter, Provider
 from ..tools import _not_impl
 from ..types import Message, StreamEvent
 
 
-class OpenAIChatAdapter(BaseAdapter):
+class OpenAIChatAdapter(BaseAdapter, Provider):
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com"):
         super().__init__(
             base_url=base_url.rstrip("/"),
@@ -44,8 +44,7 @@ class OpenAIChatAdapter(BaseAdapter):
         tracer,
         **opts,
     ) -> AsyncIterator[StreamEvent]:
-        _not_impl("OpenAI chat stream", "Phase 4")
-        yield  # pragma: no cover — 使本函数成为 async generator(桩抛错后永不执行)
+        yield _not_impl("OpenAI chat stream", "Phase 4")  # _not_impl→Never,抛异常永不产出;yield Never 协变兼容 AsyncIterator[StreamEvent]
 
     def count_tokens(self, messages: list[Message]) -> int:
-        _not_impl("OpenAI chat count_tokens", "Phase 4")
+        return _not_impl("OpenAI chat count_tokens", "Phase 4")  # Never 兼容 int
