@@ -5,7 +5,7 @@ orchestrator 能正常编译调用——只是运行到桩会抛错。
 """
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Never
+from typing import Awaitable, Callable, NoReturn
 
 from pydantic import BaseModel, ConfigDict
 
@@ -14,7 +14,7 @@ from telemetry.tracer import Tracer
 from .types import ToolResultBlock, ToolUseBlock
 
 
-def _not_impl(feature: str, phase: str) -> Never:
+def _not_impl(feature: str, phase: str) -> NoReturn:
     """桩的统一抛错(P2 §6.1)。"""
     raise NotImplementedError(f"[{feature}] 计划在 {phase} 实现;当前为 Phase 1 占位桩")
 
@@ -37,7 +37,7 @@ class Tool(BaseModel):
     name: str
     description: str
     input_model: type[BaseModel]
-    func: Callable[[BaseModel], Awaitable[str | dict]]
+    func: Callable[..., Awaitable[str | dict]]
 
     def to_schema(self) -> dict:
         return {

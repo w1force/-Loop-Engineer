@@ -6,8 +6,10 @@ transition=Continue(NEXT_TURN),整体重建 State。Phase 1 运行到这里会�
 """
 from __future__ import annotations
 
+from typing import cast
+
 from ...tools import run_tools
-from ...types import Continue, ContinueReason, State, UserMessage
+from ...types import ContentBlock, Continue, ContinueReason, State, UserMessage
 from telemetry.tracer import Tracer
 
 from .stream_turn import StreamOutcome
@@ -21,7 +23,9 @@ async def execute_tools_phase(
     )
     base = state.model_dump()
     base["messages"] = (
-        state.messages + outcome.assistant_msgs + [UserMessage(content=tool_results)]
+        state.messages
+        + outcome.assistant_msgs
+        + [UserMessage(content=cast(list[ContentBlock], tool_results))]
     )
     base["turn_count"] = state.turn_count + 1
     base["transition"] = Continue(reason=ContinueReason.NEXT_TURN)

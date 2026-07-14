@@ -17,9 +17,8 @@ from .transcript import record_transcript
 from .types import (
     AssistantMessage,
     Message,
+    StreamEvent,
     TextBlock,
-    ToolUseBlock,
-    Usage,
     UserMessage,
 )
 from telemetry.tracer import Tracer
@@ -90,7 +89,11 @@ async def submit(
     last_stop_reason: str | None = None
     total_in = total_out = 0
     async for msg in query_loop(params, tracer):
-        if isinstance(msg, AssistantMessage):
+        if isinstance(msg, StreamEvent):
+            # 流式增量实时吐给调用方(text delta),实现逐字输出
+            if msg.type == "content_block_delta" and msg.delta and "text" in msg.delta:
+                yield {"type": "text", "text": msg.delta["text"]}
+        elif isinstance(msg, AssistantMessage):
             messages.append(msg)
             await record_transcript(messages, config.transcript_path)
             last_stop_reason = msg.stop_reason
@@ -100,7 +103,6 @@ async def submit(
         elif isinstance(msg, UserMessage):
             messages.append(msg)
             await record_transcript(messages, config.transcript_path)
-        # StreamEvent: 无 UI,忽略(不持久化)
 
         if config.max_budget_usd is not None:
             if _rough_cost(total_in, total_out) >= config.max_budget_usd:

@@ -62,14 +62,14 @@ async def query_loop(
         for m in outcome.yielded:  # 透传流事件/assistant 消息给外层
             yield m
         if params.abort_signal.is_set():
-            _emit_transition(tracer, Terminal(TerminalReason.ABORTED))
+            _emit_transition(tracer, Terminal(reason=TerminalReason.ABORTED))
             return
 
         # phase 3: 分叉。needs_follow_up → 执行工具;否则交给责任链决定 Continue/Terminal
         if outcome.needs_follow_up:
             state = await execute_tools_phase(state, outcome, params, tracer)
             if state.turn_count > params.max_turns:
-                _emit_transition(tracer, Terminal(TerminalReason.MAX_TURNS))
+                _emit_transition(tracer, Terminal(reason=TerminalReason.MAX_TURNS))
                 return
             _emit_transition(tracer, state.transition)  # NEXT_TURN
             continue
@@ -79,5 +79,6 @@ async def query_loop(
         _emit_transition(tracer, decision.transition)
         if isinstance(decision.transition, Terminal):
             return
-        state = decision.next_state  # Phase 1 责任链只返回 Terminal,此分支不会到
+        state = decision.next_state
+        assert state is not None  # Continue 时责任链必给 next_state;Phase 1 此分支不会到
         continue

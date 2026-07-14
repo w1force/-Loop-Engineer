@@ -130,4 +130,5 @@ async def test_redline4_only_one_assistant_with_final_usage():
     out = [x async for x in aggregate_stream(_events(*seq), spy)]
     assts = [x for x in out if isinstance(x, AssistantMessage)]
     assert len(assts) == 1  # 不在 content_block_stop 时 yield 占位再 mutate
+    assert assts[0].usage is not None
     assert assts[0].usage.output_tokens == 99

@@ -147,4 +147,5 @@ class AnthropicAdapter(BaseAdapter):
             if "usage" in evt:
                 msg = {**msg, "usage": evt["usage"]}
             return StreamEvent(type=t, delta=evt.get("delta"), message=msg)
-        return StreamEvent(type=t)  # message_stop / 未知
+        # message_stop(其余 5 类已显式返回;未知类型已在 stream 循环过滤)
+        return StreamEvent(type="message_stop")

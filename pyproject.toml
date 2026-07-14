@@ -29,4 +29,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.pyright]
+# 用项目 .venv 解析依赖(httpx/pydantic 等装在这里),否则 pyright 用系统 python 报 import resolve 失败
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "basic"

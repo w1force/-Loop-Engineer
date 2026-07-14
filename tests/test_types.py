@@ -34,6 +34,7 @@ def test_messages_str_and_list_content():
     user_str = UserMessage(content="你好")
     assert user_str.content == "你好" and user_str.role == "user"
     user_list = UserMessage(content=[ToolResultBlock(tool_use_id="c1", content="ok")])
+    assert isinstance(user_list.content, list)
     assert user_list.content[0].type == "tool_result"
     asst = AssistantMessage(
         content=[TextBlock(text="x"), ToolUseBlock(id="c1", name="f", input={})],
@@ -49,19 +50,23 @@ def test_state_transition_and_roundtrip():
         turn_count=1,
         transition=Continue(reason=ContinueReason.NEXT_TURN),
     )
-    assert s.transition.reason is ContinueReason.NEXT_TURN
+    tr = s.transition
+    assert isinstance(tr, Continue)
+    assert tr.reason is ContinueReason.NEXT_TURN
     # round-trip: union 消息 + transition 都能 dump 后重建
     dumped = s.model_dump()
     s2 = State(**dumped)
     assert s2.turn_count == 1
-    assert isinstance(s2.transition, Continue)
-    assert s2.transition.reason is ContinueReason.NEXT_TURN
+    tr2 = s2.transition
+    assert isinstance(tr2, Continue)
+    assert tr2.reason is ContinueReason.NEXT_TURN
     assert s2.messages[0].role == "user"
 
 
 def test_stream_event_fields():
     evt = StreamEvent(type="content_block_start", index=0, block={"type": "text"})
-    assert evt.type == "content_block_start" and evt.block["type"] == "text"
+    assert evt.type == "content_block_start"
+    assert evt.block is not None and evt.block["type"] == "text"
     assert StreamEvent(type="message_stop").index is None
 
 

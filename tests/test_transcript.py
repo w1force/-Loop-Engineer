@@ -26,6 +26,10 @@ async def test_record_and_load_roundtrip(tmp_path):
     loaded = load_transcript(path)
     assert len(loaded) == 2
     assert isinstance(loaded[0], UserMessage)
-    assert isinstance(loaded[1], AssistantMessage)
-    assert loaded[1].usage.output_tokens == 3
-    assert loaded[1].content[0].text == "hi"
+    asst = loaded[1]
+    assert isinstance(asst, AssistantMessage)
+    assert asst.usage is not None
+    assert asst.usage.output_tokens == 3
+    first = asst.content[0]
+    assert isinstance(first, TextBlock)
+    assert first.text == "hi"

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from core.tools import CanUseDecision, Tool, _not_impl, default_can_use_tool, run_tools
 from core.types import ToolUseBlock
+from telemetry.tracer import NoopTracer
 
 
 class EchoInput(BaseModel):
@@ -31,7 +32,7 @@ async def test_default_can_use_tool_allows():
 
 async def test_run_tools_is_phase2_stub():
     with pytest.raises(NotImplementedError):
-        await run_tools([], [], default_can_use_tool, None)
+        await run_tools([], [], default_can_use_tool, NoopTracer())
 
 
 def test_not_impl_raises_with_clear_message():

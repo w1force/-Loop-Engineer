@@ -9,7 +9,7 @@ import respx
 
 from core.loop.orchestrator import QueryParams, query_loop
 from core.providers.anthropic import AnthropicAdapter
-from core.types import AssistantMessage, UserMessage
+from core.types import AssistantMessage, TextBlock, UserMessage
 from telemetry.events import TraceKind
 from telemetry.tracer import NoopTracer
 
@@ -68,7 +68,9 @@ async def test_query_loop_pure_text_completes():
 
     assts = [m for m in out if isinstance(m, AssistantMessage)]
     assert len(assts) == 1
-    assert assts[0].content[0].text == "你好世界"
+    first = assts[0].content[0]
+    assert isinstance(first, TextBlock)
+    assert first.text == "你好世界"
     assert assts[0].stop_reason == "end_turn"
 
 

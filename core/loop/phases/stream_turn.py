@@ -53,6 +53,7 @@ async def aggregate_stream(
     async for evt in events:
         yield evt  # 原事件透传给外层
         if evt.type == "content_block_start":
+            assert evt.index is not None
             blocks[evt.index] = dict(evt.block or {})
             if (evt.block or {}).get("type") == "tool_use":  # ★ TOOL_USE_DETECTED
                 tracer.emit(
@@ -66,6 +67,7 @@ async def aggregate_stream(
                     )
                 )
         elif evt.type == "content_block_delta":
+            assert evt.index is not None
             b = blocks[evt.index]
             d = evt.delta or {}
             if "text" in d:
@@ -75,6 +77,7 @@ async def aggregate_stream(
             if "thinking" in d:  # thinking_delta:累积思考内容(思考模型)
                 b["thinking"] = b.get("thinking", "") + d["thinking"]
         elif evt.type == "content_block_stop":
+            assert evt.index is not None
             b = blocks[evt.index]
             if b.get("type") == "tool_use":
                 b["input"] = json.loads(b.pop("input_buf", "") or "{}")

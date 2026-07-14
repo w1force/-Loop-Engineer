@@ -80,3 +80,22 @@ async def test_submit_success_writes_transcript(tmp_path):
     # transcript 落盘:含 user + assistant
     roles = [json.loads(line)["role"] for line in path.read_text(encoding="utf-8").splitlines()]
     assert "user" in roles and "assistant" in roles
+
+
+@respx.mock
+async def test_submit_streams_text_deltas(tmp_path):
+    """submit 应把 text delta 实时 yield 给调用方,而非等整条回答完成。"""
+    respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
+    path = tmp_path / "t.jsonl"
+    cfg = AgentConfig(
+        provider=AnthropicAdapter(api_key="k", base_url=BASE),
+        system="be brief",
+        model="claude-sonnet-4-6",
+        max_tokens=128,
+        transcript_path=str(path),
+    )
+    chunks = [c async for c in submit("你好", cfg, NoopTracer())]
+    text_chunks = [c["text"] for c in chunks if c.get("type") == "text"]
+    assert "".join(text_chunks) == "你好世界"  # 流式增量拼回完整回答
+    assert chunks[-1]["type"] == "result"
+    assert chunks[-1]["subtype"] == "success"
