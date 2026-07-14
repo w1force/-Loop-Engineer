@@ -18,7 +18,7 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     s = get_settings()
 
-    provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url)
+    provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url, debug_sse=s.debug_sse)
     tracer = LoggingTracer({"chain_id": "phase1"})  # 开发用;换 NoopTracer() 可静默
 
     config = AgentConfig(
@@ -30,7 +30,7 @@ async def main():
         transcript_path="run.transcript.jsonl",
     )
 
-    async for result in submit("你知道brainfuck语言吗", config, tracer):
+    async for result in submit("今天多少度", config, tracer):
         print(result)
 
 
