@@ -20,7 +20,7 @@ ToolDef = dict
 
 
 class Provider(Protocol):
-    async def stream(
+    def stream(
         self,
         *,
         messages: list[Message],

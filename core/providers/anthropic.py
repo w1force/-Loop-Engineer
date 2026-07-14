@@ -13,7 +13,7 @@ import httpx
 from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
-from ..provider import BaseAdapter, ToolDef
+from ..provider import BaseAdapter, Provider, ToolDef
 from ..types import Message, StreamEvent
 from ._sse import parse_sse
 
@@ -52,7 +52,7 @@ def to_anthropic_tools(tools: list) -> list[ToolDef]:
     return [t.to_schema() if hasattr(t, "to_schema") else t for t in tools]
 
 
-class AnthropicAdapter(BaseAdapter):
+class AnthropicAdapter(BaseAdapter, Provider):
     def __init__(self, api_key: str, base_url: str = "https://api.anthropic.com"):
         headers = {
             "x-api-key": api_key,
@@ -147,4 +147,4 @@ class AnthropicAdapter(BaseAdapter):
             if "usage" in evt:
                 msg = {**msg, "usage": evt["usage"]}
             return StreamEvent(type=t, delta=evt.get("delta"), message=msg)
-        return StreamEvent(type=t)  # message_stop / 未知
+        return StreamEvent(type="message_stop")  # message_stop(未知类型已在 stream 循环经 _CONTENT_EVENT_TYPES 过滤)
