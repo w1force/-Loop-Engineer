@@ -1,0 +1,2 @@
+{"role": "user", "content": "查一下巴黎天气"}
+{"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "get_weather", "input": {"city": "Paris"}}], "model": null, "stop_reason": "tool_use", "usage": {"input_tokens": 0, "output_tokens": 10}}
