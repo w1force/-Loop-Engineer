@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     model: str = "claude-sonnet-4-6"
     max_tokens: int = 4096
     max_turns: int = 20
+    debug_sse: bool = False  # LOOP_ENGINEER_DEBUG_SSE=true 时打印原始 SSE 流
 
 
 def get_settings() -> Settings:
