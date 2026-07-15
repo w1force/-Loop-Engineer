@@ -87,7 +87,11 @@ async def aggregate_stream(
                 continue
             b = blocks[idx]
             if b.get("type") == "tool_use":
-                b["input"] = json.loads(b.pop("input_buf", "") or "{}")
+                try:
+                    b["input"] = json.loads(b.pop("input_buf", "") or "{}")
+                except json.JSONDecodeError:
+                    # max_tokens 截断导致 input 残缺: 丢弃该 block, 由 stop_reason withhold 兜底
+                    continue
             # block 级固化:每个 content_block_stop yield 一条只含该 block 的 AssistantMessage
             yield AssistantMessage(content=[_to_block(b)])
         elif evt.type == "message_delta":  # 暂存,仅供 STREAM_END 埋点(stream_turn 由 Task 7 独立取)
@@ -111,7 +115,7 @@ class StreamOutcome(BaseModel):
     tool_calls: list[ToolUseBlock]
     needs_follow_up: bool
     stop_reason: str | None = None
-    withheld: str | None = None  # None | "prompt_too_long" | "max_output_tokens"
+    withheld: str | None = None  # None | "max_output_tokens" (prompt_too_long 走异常路径)
     yielded: list = Field(default_factory=list)  # 透传给外层的 Message | StreamEvent
 
 
@@ -131,7 +135,8 @@ async def stream_turn(
       追加到 yielded 末尾。
 
     needs_follow_up 只看有没有 ToolUseBlock,不看 stop_reason(红线#2)。
-    withheld 检测留 # TODO Phase5(Phase 1 恒 None)。
+    withheld = "max_output_tokens" iff stop_reason == "max_tokens"(权威信号来自
+    message_delta, 必到; prompt_too_long 走异常路径不产生 withheld)。
     """
     max_tokens = state.max_output_tokens_override or params.max_tokens
     events = params.provider.stream(
@@ -166,15 +171,20 @@ async def stream_turn(
                     executor.add_tool(block)
                 tool_calls.append(block)
                 needs_follow_up = True  # ★ 只看 tool_use,不看 stop_reason
+
+    # 检测是否被截断: 权威信号是 stop_reason == "max_tokens"(来自 message_delta, 必到)
+    withheld = None
+    if stop_reason == "max_tokens":
+        withheld = "max_output_tokens"
+
     # 组装整轮追加到 yielded 末尾(block 级不进 yielded,只发整轮)
     full = AssistantMessage(content=all_blocks, usage=usage, stop_reason=stop_reason)
     yielded.append(full)
-    # TODO Phase5: 捕获 prompt_too_long / max_output_tokens → withheld
     return StreamOutcome(
         assistant_msgs=[full],
         tool_calls=tool_calls,
         needs_follow_up=needs_follow_up,
         stop_reason=stop_reason,
-        withheld=None,
+        withheld=withheld,
         yielded=yielded,
     )

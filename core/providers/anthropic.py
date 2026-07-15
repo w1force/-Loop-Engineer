@@ -6,6 +6,7 @@ PROVIDER_REQUEST 埋点。这是选 Anthropic 模型作统一模型的根本原�
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -16,10 +17,18 @@ from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 from ..provider import BaseAdapter, Provider, ToolDef
+from ..provider_errors import (
+    FatalProviderError,
+    PromptTooLongError,
+    ProviderError,
+    TransientProviderError,
+)
 from ..types import Message, StreamEvent
 from ._sse import parse_sse
 
 ANTHROPIC_VERSION = "2023-06-01"
+
+logger = logging.getLogger("anthropic")
 
 # 统一 StreamEvent 只建模这 6 种内容事件;ping/error 及未来新增类型在 stream 循环里就地处理
 _CONTENT_EVENT_TYPES = {
@@ -92,41 +101,63 @@ class AnthropicAdapter(BaseAdapter, Provider):
             "stream": True,
         }
 
-        print("request body: " + json.dumps(req_body, ensure_ascii=False))
-        async with self.http.stream("POST", "/v1/messages", json=req_body) as r:
-            _t0 = time.perf_counter()  # 计时基准(仅 self._debug_sse 用)
-            if r.status_code != 200:
-                body = await r.aread()
-                tracer.emit(
-                    TraceEvent(
-                        kind=TraceKind.PROVIDER_ERROR,
-                        payload={"status": r.status_code, "body": body[:200]},
-                    )
-                )
-                raise httpx.HTTPStatusError(
-                    f"Anthropic {r.status_code}", request=r.request, response=r
-                )
-            async for data in parse_sse(r):  # data: str(见 _sse.py)
-                if self._debug_sse:
-                    print(f"[sse +{time.perf_counter() - _t0:6.3f}s] {data}", file=sys.stderr, flush=True)
-                if data == "[DONE]":  # Anthropic 无 [DONE],保险起备
-                    break
-                evt = json.loads(data)
-                t = evt.get("type")
-                if t == "ping":
-                    continue  # 心跳保活,忽略
-                if t == "error":  # 流中错误:打埋点并抛
+        logger.debug("request body: " + json.dumps(req_body, ensure_ascii=False))
+        try:
+            async with self.http.stream("POST", "/v1/messages", json=req_body) as r:
+                _t0 = time.perf_counter()  # 计时基准(仅 self._debug_sse 用)
+                if r.status_code != 200:
+                    body = await r.aread()
                     tracer.emit(
-                        TraceEvent(kind=TraceKind.PROVIDER_ERROR, payload=evt)
+                        TraceEvent(
+                            kind=TraceKind.PROVIDER_ERROR,
+                            payload={"status": r.status_code, "body": body[:200]},
+                        )
                     )
-                    raise httpx.HTTPStatusError(
-                        f"Anthropic stream error: {evt.get('error')}",
-                        request=r.request,
-                        response=r,
-                    )
-                if t not in _CONTENT_EVENT_TYPES:
-                    continue  # 未知事件容错跳过(未来新增类型不至于炸)
-                yield self._to_stream_event(evt)
+                    raise self._classify_status_error(r.status_code, body)
+                async for data in parse_sse(r):  # data: str(见 _sse.py)
+                    if self._debug_sse:
+                        print(f"[sse +{time.perf_counter() - _t0:6.3f}s] {data}", file=sys.stderr, flush=True)
+                    if data == "[DONE]":  # Anthropic 无 [DONE],保险起备
+                        break
+                    evt = json.loads(data)
+                    t = evt.get("type")
+                    if t == "ping":
+                        continue  # 心跳保活,忽略
+                    if t == "error":  # 流中错误:打埋点并抛
+                        tracer.emit(
+                            TraceEvent(kind=TraceKind.PROVIDER_ERROR, payload=evt)
+                        )
+                        raise self._classify_stream_error(evt)
+                    if t not in _CONTENT_EVENT_TYPES:
+                        continue  # 未知事件容错跳过(未来新增类型不至于炸)
+                    yield self._to_stream_event(evt)
+        except httpx.TransportError as e:
+            # 网络中断(ConnectError/ReadTimeout/RemoteProtocolError 等)→ 可重试
+            tracer.emit(
+                TraceEvent(
+                    kind=TraceKind.PROVIDER_ERROR,
+                    payload={"transport": type(e).__name__},
+                )
+            )
+            raise TransientProviderError(f"transport error: {e}") from e
+
+    @staticmethod
+    def _classify_status_error(status: int, body: bytes) -> ProviderError:
+        """HTTP 状态码 + body → 分类异常(供 query_loop 责任链分发)。"""
+        text = body.decode("utf-8", errors="replace").lower()
+        if status == 429 or status >= 500:
+            return TransientProviderError(f"HTTP {status}", status=status, body=body)
+        if status == 400 and "prompt is too long" in text:
+            return PromptTooLongError("prompt is too long", status=status, body=body)
+        return FatalProviderError(f"HTTP {status}", status=status, body=body)
+
+    @staticmethod
+    def _classify_stream_error(evt: dict) -> ProviderError:
+        """SSE error 事件 → 分类异常(overloaded 可重试,其余致命)。"""
+        err = evt.get("error") or {}
+        if err.get("type") == "overloaded_error":
+            return TransientProviderError(f"stream overloaded: {err}")
+        return FatalProviderError(f"stream error: {err}")
 
     def count_tokens(self, messages: list[Message]) -> int:
         # Phase 1 粗略估算(Phase 5 compact 才真正用到)

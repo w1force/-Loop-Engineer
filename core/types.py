@@ -83,6 +83,8 @@ class StopReason(str, Enum):
 class ContinueReason(str, Enum):
     # ── MVP 必需 ──
     NEXT_TURN = "next_turn"
+    # ── 网络重试 ──
+    NETWORK_RETRY = "network_retry"
     # ── Phase 5 recovery ──
     MAX_OUTPUT_TOKENS_ESCALATE = "max_output_tokens_escalate"
     MAX_OUTPUT_TOKENS_RECOVERY = "max_output_tokens_recovery"
@@ -95,7 +97,7 @@ class TerminalReason(str, Enum):
     # ── MVP 必需 ──
     COMPLETED = "completed"
     MAX_TURNS = "max_turns"
-    ABORTED = "aborted"  # 真实项目分 aborted_streaming/aborted_tools,这里合一
+    USER_INTERRUPT = "user_interrupt"  # 用户中断(原 ABORTED)
     MODEL_ERROR = "model_error"
     PROMPT_TOO_LONG = "prompt_too_long"  # 恢复链全失败后才到这
     # ── 可选 ──
@@ -118,9 +120,10 @@ class State(BaseModel):
     max_output_tokens_recovery_count: int = 0
     max_output_tokens_override: int | None = None
     has_attempted_autocompact: bool = False
+    network_retry_count: int = 0
     transition: Continue | Terminal | None = None
 
 
 # ── 常量(对齐真实项目 query.ts) ──
 MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3  # query.ts:164
-ESCALATED_MAX_TOKENS = 32000  # 占位:按所用模型上限设定,Phase5 校准
+ESCALATED_MAX_TOKENS = 64_000  # 占位:按所用模型上限设定,Phase5 校准

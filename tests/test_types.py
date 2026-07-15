@@ -69,7 +69,7 @@ def test_enums_and_constants():
     assert ContinueReason.NEXT_TURN.value == "next_turn"
     assert TerminalReason.COMPLETED.value == "completed"
     assert MAX_OUTPUT_TOKENS_RECOVERY_LIMIT == 3
-    assert ESCALATED_MAX_TOKENS == 32000
+    assert ESCALATED_MAX_TOKENS == 64_000
     # Terminal 可带 error
     term = Terminal(reason=TerminalReason.MODEL_ERROR, error="boom")
     assert term.error == "boom"
@@ -78,3 +78,22 @@ def test_enums_and_constants():
 def test_trace_event_defaults():
     e = TraceEvent(kind=TraceKind.TURN_START, turn=1)
     assert e.depth == 0 and e.payload == {} and e.turn == 1
+
+
+# ── Task 2: 网络重试 / 用户中断 / 计数字段 / 上限常量 ──
+def test_network_retry_continue_reason_exists():
+    assert ContinueReason.NETWORK_RETRY.value == "network_retry"
+
+
+def test_user_interrupt_replaces_aborted():
+    assert TerminalReason.USER_INTERRUPT.value == "user_interrupt"
+    assert not hasattr(TerminalReason, "ABORTED")
+
+
+def test_state_network_retry_count_defaults_zero():
+    s = State(messages=[UserMessage(content="hi")])
+    assert s.network_retry_count == 0
+
+
+def test_escalated_max_tokens_is_64000():
+    assert ESCALATED_MAX_TOKENS == 64_000

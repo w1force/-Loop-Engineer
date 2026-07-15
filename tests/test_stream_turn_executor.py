@@ -85,3 +85,62 @@ async def test_stream_turn_feeds_executor_and_assembles_full_turn(monkeypatch):
     # yielded 不含 block 级(只有原始 StreamEvent + 末尾整轮)
     assts_in_yielded = [m for m in outcome.yielded if isinstance(m, AssistantMessage)]
     assert len(assts_in_yielded) == 1
+
+
+def _seq_max_tokens_text():
+    """纯 text 输出撞 max_tokens: stop_reason=max_tokens。"""
+    return [
+        StreamEvent(type="message_start"),
+        StreamEvent(type="content_block_start", index=0, block={"type": "text", "text": ""}),
+        StreamEvent(type="content_block_delta", index=0, delta={"text": "半句话"}),
+        StreamEvent(type="content_block_stop", index=0),
+        StreamEvent(type="message_delta",
+                    delta={"stop_reason": "max_tokens"},
+                    message={"usage": {"input_tokens": 1, "output_tokens": 1}}),
+        StreamEvent(type="message_stop"),
+    ]
+
+
+async def test_withheld_max_output_tokens():
+    class _FakeProvider:
+        def stream(self, **kwargs):
+            async def _g():
+                for e in _seq_max_tokens_text():
+                    yield e
+            return _g()
+        def count_tokens(self, messages): return 0
+
+    state = State(messages=[UserMessage(content="hi")])
+    params = QueryParams(
+        messages=state.messages, system="", model="m", max_tokens=16,
+        provider=_FakeProvider(), abort_signal=asyncio.Event(),
+    )
+    outcome = await stream_turn(state, params, NoopTracer(), None)
+    assert outcome.withheld == "max_output_tokens"
+    assert outcome.stop_reason == "max_tokens"
+
+
+async def test_withheld_none_when_end_turn():
+    class _FakeProvider:
+        def stream(self, **kwargs):
+            async def _g():
+                for e in [
+                    StreamEvent(type="message_start"),
+                    StreamEvent(type="content_block_start", index=0, block={"type": "text", "text": ""}),
+                    StreamEvent(type="content_block_delta", index=0, delta={"text": "done"}),
+                    StreamEvent(type="content_block_stop", index=0),
+                    StreamEvent(type="message_delta", delta={"stop_reason": "end_turn"},
+                                message={"usage": {"input_tokens": 1, "output_tokens": 1}}),
+                    StreamEvent(type="message_stop"),
+                ]:
+                    yield e
+            return _g()
+        def count_tokens(self, messages): return 0
+
+    state = State(messages=[UserMessage(content="hi")])
+    params = QueryParams(
+        messages=state.messages, system="", model="m", max_tokens=16,
+        provider=_FakeProvider(), abort_signal=asyncio.Event(),
+    )
+    outcome = await stream_turn(state, params, NoopTracer(), None)
+    assert outcome.withheld is None

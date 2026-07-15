@@ -5,8 +5,9 @@ import pytest
 from pydantic import BaseModel
 
 from core.tools import Tool, ToolContext, default_can_use_tool
+from core.tool_executor.base import TrackedTool
 from core.tool_executor.streaming import StreamingToolExecutor
-from core.types import ToolUseBlock
+from core.types import ToolResultBlock, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -16,6 +17,11 @@ class _In(BaseModel):
 
 def _ctx():
     return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+
+
+def _tracked(tid: str, name: str) -> TrackedTool:
+    blk = ToolUseBlock(id=tid, name=name, input={})
+    return TrackedTool(block=blk, result=ToolResultBlock(tool_use_id=tid, content="ph", is_error=True))
 
 
 def _tool(name, safe, func):
@@ -105,17 +111,16 @@ async def test_can_execute_rules():
     unsafe = _tool("w", False, lambda i, c: "ok")
     ex.register_tool(safe)
     ex.register_tool(unsafe)
-    from core.tool_executor.base import TrackedTool
 
     # 无人跑 → 任何工具可跑
-    assert ex._can_execute(TrackedTool(ToolUseBlock(id="a", name="r", input={}))) is True
-    assert ex._can_execute(TrackedTool(ToolUseBlock(id="b", name="w", input={}))) is True
+    assert ex._can_execute(_tracked("a", "r")) is True
+    assert ex._can_execute(_tracked("b", "w")) is True
     # 一个 safe 在跑 → safe 可并行, unsafe 不可
-    running_safe = TrackedTool(ToolUseBlock(id="a", name="r", input={}))
+    running_safe = _tracked("a", "r")
     running_safe.status = "executing"
     ex._tracked.append(running_safe)
-    assert ex._can_execute(TrackedTool(ToolUseBlock(id="c", name="r", input={}))) is True
-    assert ex._can_execute(TrackedTool(ToolUseBlock(id="d", name="w", input={}))) is False
+    assert ex._can_execute(_tracked("c", "r")) is True
+    assert ex._can_execute(_tracked("d", "w")) is False
 
 
 async def test_discard_cancels_inflight():

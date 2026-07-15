@@ -70,10 +70,14 @@ async def demo_real_llm() -> None:
     async for result in submit(user_input, config, tracer):
         print(result)
 
-
-def main() -> None:
+def log_config():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     logging.getLogger("telemetry").setLevel(logging.WARNING)  # 关 telemetry 日志,只留 tool_executor
+    logging.getLogger("anthropic").setLevel(logging.DEBUG)  # 关 telemetry 日志,只留 tool_executor
+    logging.getLogger("tool_executor").setLevel(logging.DEBUG)  # 关 telemetry 日志,只留 tool_executor
+
+def main() -> None:
+    log_config()
     asyncio.run(demo_real_llm())
 
 
