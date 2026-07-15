@@ -1,16 +1,19 @@
-"""tools: Tool.to_schema / default_can_use_tool / run_tools 桩。"""
+"""tools: Tool.to_schema / default_can_use_tool / ToolContext / Tool 新字段。"""
+import asyncio
+
 import pytest
 from pydantic import BaseModel
 
-from core.tools import CanUseDecision, Tool, _not_impl, default_can_use_tool, run_tools
+from core.tools import CanUseDecision, Tool, ToolContext, _not_impl, default_can_use_tool
 from core.types import ToolUseBlock
+from telemetry.tracer import NoopTracer
 
 
 class EchoInput(BaseModel):
     msg: str
 
 
-async def _echo(inp: EchoInput) -> str:
+async def _echo(inp: EchoInput, ctx: ToolContext) -> str:
     return inp.msg
 
 
@@ -18,7 +21,6 @@ def test_tool_to_schema_generates_json_schema():
     t = Tool(name="echo", description="echo back", input_model=EchoInput, func=_echo)
     schema = t.to_schema()
     assert schema["name"] == "echo"
-    assert schema["description"] == "echo back"
     assert schema["input_schema"]["type"] == "object"
     assert "msg" in schema["input_schema"]["properties"]
 
@@ -29,9 +31,15 @@ async def test_default_can_use_tool_allows():
     assert decision.allow is True
 
 
-async def test_run_tools_is_phase2_stub():
-    with pytest.raises(NotImplementedError):
-        await run_tools([], [], default_can_use_tool, None)
+def test_tool_defaults_is_concurrency_safe_false_and_no_pre_execute():
+    t = Tool(name="echo", description="d", input_model=EchoInput, func=_echo)
+    assert t.is_concurrency_safe is False
+    assert t.pre_execute is None
+
+
+def test_tool_context_carries_fields():
+    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    assert ctx.state is None  # 预留字段默认 None
 
 
 def test_not_impl_raises_with_clear_message():

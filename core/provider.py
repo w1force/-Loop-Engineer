@@ -15,6 +15,8 @@ from .types import Message, StreamEvent
 if TYPE_CHECKING:
     from telemetry.tracer import Tracer
 
+    from .tools import Tool
+
 # Tool.to_schema() 的产物: {"name","description","input_schema"}
 ToolDef = dict
 
@@ -25,7 +27,7 @@ class Provider(Protocol):
         *,
         messages: list[Message],
         system: str | list[dict],
-        tools: list[ToolDef],
+        tools: list[Tool] | list[ToolDef],
         model: str,
         max_tokens: int,
         abort_signal: asyncio.Event,

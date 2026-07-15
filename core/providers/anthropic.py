@@ -91,6 +91,8 @@ class AnthropicAdapter(BaseAdapter, Provider):
             "max_tokens": max_tokens,
             "stream": True,
         }
+
+        print("request body: " + json.dumps(req_body))
         async with self.http.stream("POST", "/v1/messages", json=req_body) as r:
             _t0 = time.perf_counter()  # 计时基准(仅 self._debug_sse 用)
             if r.status_code != 200:
