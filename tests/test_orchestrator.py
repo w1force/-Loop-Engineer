@@ -86,3 +86,19 @@ async def test_query_loop_trace_sequence_completes():
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     assert transitions, "should emit at least one TRANSITION"
     assert transitions[-1].payload["reason"] == "completed"
+
+
+@respx.mock
+async def test_query_loop_pure_text_no_tool_execution():
+    """无 tool_use → 不进入 executor.get_results 分支,直接 completed。
+
+    验证 executor 接线不破坏纯文本路径:即使每轮都构造 executor,
+    只要 provider 不产 tool_use,就不会调用 get_results / 不会 needs_follow_up。
+    """
+    respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
+    spy = SpyTracer()
+    out = [m async for m in query_loop(_params(), spy)]
+    # 无 tool_use → 不进入 get_results 分支,直接 completed
+    transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
+    assert transitions[-1].payload["reason"] == "completed"
+

@@ -14,3 +14,10 @@ wheels/
 
 # transcript 持久化产物
 *.transcript.jsonl
+
+
+# dev main入口
+main-lwt.py
+
+# 临时文件夹
+tmp-dir/

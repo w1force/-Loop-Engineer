@@ -1,8 +1,8 @@
 """phase: 流式调 LLM + aggregate_stream(边聚合边打点)。
 
-aggregate_stream 在 P1 §6 逻辑基础上只加 tracer.emit,不改逻辑(P2 §3.5)。
-红线#4: usage/stop_reason 暂存,等 message_stop 一次性组装最终 AssistantMessage 再 yield
-(Python AsyncGenerator yield 后 mutate 不安全,与 TS 版的关键差异)。
+aggregate_stream: 每个 content_block_stop 固化一个 block 就 yield 一条 block 级
+AssistantMessage(content=[block]);message_stop 仅做 STREAM_END 埋点,不再组装整轮。
+usage/stop_reason 仍在内部暂存供埋点用,整轮组装由 stream_turn 负责(见 Task 7)。
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 if TYPE_CHECKING:
+    from ...tool_executor.base import ToolExecutor
     from ..orchestrator import QueryParams
 
 
@@ -53,7 +54,10 @@ async def aggregate_stream(
     async for evt in events:
         yield evt  # 原事件透传给外层
         if evt.type == "content_block_start":
-            blocks[evt.index] = dict(evt.block or {})
+            idx = evt.index
+            if idx is None:  # 守卫: 协议上 index 必有, 防御 pyright int|None
+                continue
+            blocks[idx] = dict(evt.block or {})
             if (evt.block or {}).get("type") == "tool_use":  # ★ TOOL_USE_DETECTED
                 tracer.emit(
                     TraceEvent(
@@ -61,12 +65,15 @@ async def aggregate_stream(
                         payload={
                             "tool_name": (evt.block or {}).get("name"),
                             "tool_use_id": (evt.block or {}).get("id"),
-                            "index": evt.index,
+                            "index": idx,
                         },
                     )
                 )
         elif evt.type == "content_block_delta":
-            b = blocks[evt.index]
+            idx = evt.index
+            if idx is None:  # 守卫: 防御 pyright int|None
+                continue
+            b = blocks[idx]
             d = evt.delta or {}
             if "text" in d:
                 b["text"] = b.get("text", "") + d["text"]
@@ -75,10 +82,15 @@ async def aggregate_stream(
             if "thinking" in d:  # thinking_delta:累积思考内容(思考模型)
                 b["thinking"] = b.get("thinking", "") + d["thinking"]
         elif evt.type == "content_block_stop":
-            b = blocks[evt.index]
+            idx = evt.index
+            if idx is None:  # 守卫: 防御 pyright int|None
+                continue
+            b = blocks[idx]
             if b.get("type") == "tool_use":
                 b["input"] = json.loads(b.pop("input_buf", "") or "{}")
-        elif evt.type == "message_delta":  # 暂存,不写进已 yield 的对象(红线#4)
+            # block 级固化:每个 content_block_stop yield 一条只含该 block 的 AssistantMessage
+            yield AssistantMessage(content=[_to_block(b)])
+        elif evt.type == "message_delta":  # 暂存,仅供 STREAM_END 埋点(stream_turn 由 Task 7 独立取)
             stop_reason = (evt.delta or {}).get("stop_reason", stop_reason)
             if evt.message and "usage" in evt.message:
                 usage = Usage(**evt.message["usage"])
@@ -89,8 +101,7 @@ async def aggregate_stream(
                     payload={"stop_reason": stop_reason, "usage": usage.model_dump()},
                 )
             )
-            content = [_to_block(b) for _, b in sorted(blocks.items())]
-            yield AssistantMessage(content=content, usage=usage, stop_reason=stop_reason)
+            # 不再组装整轮 yield(由 stream_turn 收集 block 级后组装,见 Task 7)
 
 
 class StreamOutcome(BaseModel):
@@ -104,10 +115,22 @@ class StreamOutcome(BaseModel):
     yielded: list = Field(default_factory=list)  # 透传给外层的 Message | StreamEvent
 
 
-async def stream_turn(state: State, params: "QueryParams", tracer: Tracer) -> StreamOutcome:
-    """调 provider.stream → aggregate_stream → 填 StreamOutcome。
+async def stream_turn(
+    state: State,
+    params: "QueryParams",
+    tracer: Tracer,
+    executor: "ToolExecutor | None",
+) -> StreamOutcome:
+    """调 provider.stream → aggregate_stream → 喂 executor + 组装整轮 AssistantMessage。
 
-    needs_follow_up 只看 AssistantMessage 里有没有 ToolUseBlock,不看 stop_reason(红线#2)。
+    - StreamEvent: 透传到 yielded;message_delta 时取 stop_reason/usage;
+    - block 级 AssistantMessage(aggregate_stream 每 content_block_stop 产一条):
+      累积到 all_blocks;若是 ToolUseBlock 则 executor.add_tool(机会主义,block 一到即喂)
+      + 收集 tool_calls + 置 needs_follow_up=True;block 级本身**不进 yielded**;
+    - 遍历结束组装一条整轮 AssistantMessage(content=all_blocks, usage, stop_reason)
+      追加到 yielded 末尾。
+
+    needs_follow_up 只看有没有 ToolUseBlock,不看 stop_reason(红线#2)。
     withheld 检测留 # TODO Phase5(Phase 1 恒 None)。
     """
     max_tokens = state.max_output_tokens_override or params.max_tokens
@@ -120,23 +143,35 @@ async def stream_turn(state: State, params: "QueryParams", tracer: Tracer) -> St
         abort_signal=params.abort_signal,
         tracer=tracer,
     )
-    assistant_msgs: list[AssistantMessage] = []
+    all_blocks: list[TextBlock | ToolUseBlock] = []
     tool_calls: list[ToolUseBlock] = []
     needs_follow_up = False
     stop_reason: str | None = None
+    usage = Usage()
     yielded: list = []
     async for item in aggregate_stream(events, tracer):
-        yielded.append(item)
-        if isinstance(item, AssistantMessage):
-            assistant_msgs.append(item)
-            stop_reason = item.stop_reason
-            new_tools = [b for b in item.content if isinstance(b, ToolUseBlock)]
-            if new_tools:  # ★ 只看 tool_use,不看 stop_reason
-                tool_calls += new_tools
-                needs_follow_up = True
+        if isinstance(item, StreamEvent):
+            yielded.append(item)
+            if item.type == "message_delta":  # 取 stop_reason/usage
+                d = item.delta or {}
+                if "stop_reason" in d:
+                    stop_reason = d["stop_reason"]
+                if item.message and "usage" in item.message:
+                    usage = Usage(**item.message["usage"])
+        else:  # block 级 AssistantMessage(内部累积,不进 yielded)
+            block = item.content[0]
+            all_blocks.append(block)
+            if isinstance(block, ToolUseBlock):
+                if executor is not None:  # 喂 executor(机会主义:block 一到即 add_tool)
+                    executor.add_tool(block)
+                tool_calls.append(block)
+                needs_follow_up = True  # ★ 只看 tool_use,不看 stop_reason
+    # 组装整轮追加到 yielded 末尾(block 级不进 yielded,只发整轮)
+    full = AssistantMessage(content=all_blocks, usage=usage, stop_reason=stop_reason)
+    yielded.append(full)
     # TODO Phase5: 捕获 prompt_too_long / max_output_tokens → withheld
     return StreamOutcome(
-        assistant_msgs=assistant_msgs,
+        assistant_msgs=[full],
         tool_calls=tool_calls,
         needs_follow_up=needs_follow_up,
         stop_reason=stop_reason,

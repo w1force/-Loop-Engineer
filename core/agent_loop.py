@@ -8,11 +8,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Literal
 
 from .loop.orchestrator import QueryParams, query_loop
-from .provider import Provider, ToolDef
-from .tools import default_can_use_tool
+from .provider import Provider
+from .tools import Tool, default_can_use_tool
 from .transcript import record_transcript
 from .types import (
     AssistantMessage,
@@ -34,10 +34,11 @@ class AgentConfig:
     abort_signal: asyncio.Event = field(default_factory=asyncio.Event)
     max_turns: int = 20
     initial_messages: list[Message] = field(default_factory=list)
-    tools: list[ToolDef] = field(default_factory=list)
+    tools: list[Tool] = field(default_factory=list)
     can_use_tool: Callable = default_can_use_tool
     max_budget_usd: float | None = None
     transcript_path: str = "transcript.jsonl"
+    tool_execution_mode: Literal["streaming", "batch"] = "streaming"
 
 
 def is_result_successful(msg, stop_reason: str | None) -> bool:
@@ -85,6 +86,7 @@ async def submit(
         tools=config.tools,
         max_turns=config.max_turns,
         can_use_tool=config.can_use_tool,
+        tool_execution_mode=config.tool_execution_mode,
     )
 
     last_stop_reason: str | None = None

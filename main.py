@@ -1,38 +1,81 @@
-"""组装入口: 跑一次 Anthropic 纯文本对话(Phase 1 验收)。
+"""调试入口: 演示 ToolExecutor 并发控制。
 
-读 config → AnthropicAdapter → AgentConfig → 选 tracer(LoggingTracer 开发用)
-→ async for r in submit("你好", config, tracer): print(r)
+两个入口(命令行参数选):
+  uv run python main-lwt.py mock   可控 mock tool_use 流, 演示 safe 并行 + unsafe 独占 + 保序
+  uv run python main-lwt.py real   真实 Anthropic LLM, 观察 executor 对实际 tool_use 的调度
 
-换 NoopTracer 可静默埋点;真实 API key 由环境变量 ANTHROPIC_API_KEY 提供。
+mock 序列 [fetch×3, write×1, fetch×2] 测保序: unsafe 后的 safe 也要等 unsafe 跑完。
 """
 import asyncio
 import logging
+import sys
+from time import sleep
+
+from pydantic import BaseModel
 
 from config import get_settings
 from core.agent_loop import AgentConfig, submit
 from core.providers.anthropic import AnthropicAdapter
-from telemetry.tracer import LoggingTracer
+from core.tools import Tool, ToolContext, default_can_use_tool
+from core.tool_executor import StreamingToolExecutor
+from core.types import ToolUseBlock
+from telemetry.tracer import LoggingTracer, NoopTracer
 
 
-async def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+# ── mock 工具 ──────────────────────────────────────
+class FetchIn(BaseModel):
+    key: str
+
+
+class WriteIn(BaseModel):
+    key: str
+    value: str
+
+
+async def _fetch(inp: FetchIn, ctx) -> dict:
+    await asyncio.sleep(0.5)  # 让并发时序可见
+    return {"key": inp.key, "value": f"data-{inp.key}"}
+
+
+async def _write(inp: WriteIn, ctx) -> str:
+    await asyncio.sleep(0.5)
+    return f"written:{inp.key}"
+
+
+def build_tools() -> list[Tool]:
+    return [
+        Tool(name="fetch_data", description="读取一个 key 的数据(只读,可并发)",
+             input_model=FetchIn, func=_fetch, is_concurrency_safe=True),
+        Tool(name="write_data", description="写入一个 key 的数据(写,需独占)",
+             input_model=WriteIn, func=_write, is_concurrency_safe=False),
+    ]
+
+# ── 入口2: 真实 LLM ────────────────────────────────
+async def demo_real_llm() -> None:
     s = get_settings()
-
     provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url, debug_sse=s.debug_sse)
-    tracer = LoggingTracer({"chain_id": "phase1"})  # 开发用;换 NoopTracer() 可静默
-
+    tracer = LoggingTracer({"chain_id": "demo"})
     config = AgentConfig(
         provider=provider,
-        system="你是一个简洁的中文助手。",
+        system=("你是一个助手。读数据用 fetch_data(只读,可一次并行读多个 key),"
+                "写数据用 write_data。先并行读、再写。"),
         model=s.model,
         max_tokens=s.max_tokens,
         max_turns=s.max_turns,
+        tools=build_tools(),
+        tool_execution_mode="streaming",
         transcript_path="run.transcript.jsonl",
     )
-
-    async for result in submit("今天多少度", config, tracer):
+    user_input = "帮我读 a、b、c 三个 key,然后把结果汇总写到 x"
+    async for result in submit(user_input, config, tracer):
         print(result)
 
 
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    logging.getLogger("telemetry").setLevel(logging.WARNING)  # 关 telemetry 日志,只留 tool_executor
+    asyncio.run(demo_real_llm())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

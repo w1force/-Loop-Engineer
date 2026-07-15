@@ -4,6 +4,7 @@
 Phase 1 真正用到的: TURN_START / PROVIDER_REQUEST / TOOL_USE_DETECTED /
 STREAM_END / TRANSITION;其余枚举先定义占位,后续 phase 再打。
 """
+
 from enum import Enum
 
 from pydantic import BaseModel, Field
