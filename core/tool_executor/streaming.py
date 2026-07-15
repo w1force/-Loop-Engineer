@@ -6,8 +6,11 @@ _run_all 收尾:推进未启动的 + await 全部完成。
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from .base import ToolExecutor, TrackedTool
+
+logger = logging.getLogger("tool_executor")
 
 
 class StreamingToolExecutor(ToolExecutor):
@@ -33,7 +36,10 @@ class StreamingToolExecutor(ToolExecutor):
         executing = [t for t in self._tracked if t.status == "executing"]
         if not executing:
             return True
-        return self._is_safe(tracked) and all(self._is_safe(t) for t in executing)
+        ok = self._is_safe(tracked) and all(self._is_safe(t) for t in executing)
+        logger.info("can_execute %s %s: %s (executing=%d)",
+                     tracked.block.id, tracked.block.name, ok, len(executing))
+        return ok
 
     def _try_schedule(self) -> None:
         """扫描 queued, 能跑的启动; 遇到跑不了的**非安全**工具 break 保序。"""
@@ -42,8 +48,10 @@ class StreamingToolExecutor(ToolExecutor):
                 continue
             if self._can_execute(t):
                 t.status = "executing"
+                logger.info("schedule %s %s start", t.block.id, t.block.name)
                 t.task = asyncio.create_task(self._run(t))
             elif not self._is_safe(t):
+                logger.info("schedule %s %s break (unsafe blocked, 保序)", t.block.id, t.block.name)
                 break  # 非安全跑不了→停(给它后面的保序, 不让插队)
 
     async def _run(self, tracked: TrackedTool) -> None:

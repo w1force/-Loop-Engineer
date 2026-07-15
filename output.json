@@ -1,0 +1,116 @@
+{
+  "model": "glm-5.1",
+  "messages": [
+    {
+      "role": "user",
+      "content": "帮我读 a、b、c 三个 key,然后把结果汇总写到 x"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "好的，先并行读取 `a`、`b`、`c` 三个 key 的数据。"
+        },
+        {
+          "type": "tool_use",
+          "id": "call_f73259b99bac46348c9b8237",
+          "name": "fetch_data",
+          "input": { "key": "a" }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_65af41cfe03c46c9882e57e1",
+          "name": "fetch_data",
+          "input": { "key": "b" }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_feae5fdcecf8453295c27608",
+          "name": "fetch_data",
+          "input": { "key": "c" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_f73259b99bac46348c9b8237",
+          "content": [{ "key": "a", "value": "data-a" }],
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_65af41cfe03c46c9882e57e1",
+          "content": [{ "key": "b", "value": "data-b" }],
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_feae5fdcecf8453295c27608",
+          "content": [{ "key": "c", "value": "data-c" }],
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "三个 key 都读取成功，结果如下：\n\n| Key | Value |\n|-----|-------|\n| a   | data-a |\n| b   | data-b |\n| c   | data-c |\n\n现在将结果汇总写入 `x`。"
+        },
+        {
+          "type": "tool_use",
+          "id": "call_7c8dafc9077a4037b730d35c",
+          "name": "write_data",
+          "input": {
+            "key": "x",
+            "value": "{\"a\": \"data-a\", \"b\": \"data-b\", \"c\": \"data-c\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_7c8dafc9077a4037b730d35c",
+          "content": "written:x",
+          "is_error": false
+        }
+      ]
+    }
+  ],
+  "system": "你是一个助手。读数据用 fetch_data(只读,可一次并行读多个 key),写数据用 write_data。先并行读、再写。",
+  "tools": [
+    {
+      "name": "fetch_data",
+      "description": "读取一个 key 的数据(只读,可并发)",
+      "input_schema": {
+        "properties": { "key": { "title": "Key", "type": "string" } },
+        "required": ["key"],
+        "title": "FetchIn",
+        "type": "object"
+      }
+    },
+    {
+      "name": "write_data",
+      "description": "写入一个 key 的数据(写,需独占)",
+      "input_schema": {
+        "properties": {
+          "key": { "title": "Key", "type": "string" },
+          "value": { "title": "Value", "type": "string" }
+        },
+        "required": ["key", "value"],
+        "title": "WriteIn",
+        "type": "object"
+      }
+    }
+  ],
+  "max_tokens": 8000,
+  "stream": true
+}

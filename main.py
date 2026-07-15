@@ -30,7 +30,7 @@ async def main():
         transcript_path="run.transcript.jsonl",
     )
 
-    async for result in submit("今天多少度", config, tracer):
+    async for result in submit("讲一个100字的故事", config, tracer):
         print(result)
 
 

@@ -106,5 +106,8 @@ async def query_loop(
         _emit_transition(tracer, decision.transition)
         if isinstance(decision.transition, Terminal):
             return
-        state = decision.next_state  # Phase 1 责任链只返回 Terminal,此分支不会到
+        # transition 是 Continue:Phase 5 责任链给出重建后的 state(Phase 1 不会到)
+        if decision.next_state is None:
+            return  # 防御:Continue 不该无 next_state
+        state = decision.next_state
         continue
