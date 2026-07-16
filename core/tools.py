@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from telemetry.tracer import Tracer
 
-from .types import ToolUseBlock
+from .types import TextBlock, ToolUseBlock
 
 if TYPE_CHECKING:
     from .types import State
@@ -56,7 +56,7 @@ class Tool(BaseModel):
     input_model: type[BaseModel]
     # func/pre_execute 用 Callable[..., ...]:每个工具的 func 接受自己的 input_model(具体子类),
     # 声明 [BaseModel, ToolContext] 会因逆变被 pyright 拒;运行时由 input_model.model_validate 保证类型。
-    func: Callable[..., Awaitable[str | dict]]
+    func: Callable[..., Awaitable[str | TextBlock | list[TextBlock]]]
     is_concurrency_safe: bool = False  # 只读工具置 True,写工具默认 False(独占)
     pre_execute: Callable[..., Awaitable[None]] | None = None  # 语义校验钩子(预留)
 

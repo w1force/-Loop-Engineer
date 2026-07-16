@@ -24,7 +24,7 @@ class ToolUseBlock(BaseModel):
 class ToolResultBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
-    content: str | list[dict]
+    content: str | list[TextBlock]   # 收窄: 原 str | list[dict]
     is_error: bool = False
 
 

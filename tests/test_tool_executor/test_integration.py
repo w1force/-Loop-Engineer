@@ -28,7 +28,7 @@ class _WeatherIn(BaseModel):
 
 async def _weather(inp, ctx):
     """真实可执行的工具:返回城市+温度。executor 实际会调用它。"""
-    return {"city": inp.city, "temp": "26C"}
+    return f"{inp.city} 26C"
 
 
 def _tool():

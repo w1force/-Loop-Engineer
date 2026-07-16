@@ -16,7 +16,7 @@ class _In(BaseModel):
 
 
 async def _ok(inp, ctx):
-    return {"w": inp.city}
+    return inp.city
 
 
 def _seq_tool_use():

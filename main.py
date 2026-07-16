@@ -32,9 +32,9 @@ class WriteIn(BaseModel):
     value: str
 
 
-async def _fetch(inp: FetchIn, ctx) -> dict:
+async def _fetch(inp: FetchIn, ctx) -> str:
     await asyncio.sleep(0.5)  # 让并发时序可见
-    return {"key": inp.key, "value": f"data-{inp.key}"}
+    return f"data-{inp.key}"
 
 
 async def _write(inp: WriteIn, ctx) -> str:

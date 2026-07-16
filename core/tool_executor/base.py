@@ -20,7 +20,7 @@ from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 from ..tools import CanUseDecision, Tool, ToolContext
-from ..types import ToolResultBlock, ToolUseBlock
+from ..types import TextBlock, ToolResultBlock, ToolUseBlock
 
 logger = logging.getLogger("tool_executor")
 _PLACEHOLDER_REASON = "tool execution interrupted"
@@ -41,11 +41,13 @@ class TrackedTool:
     task: asyncio.Task | None = None
 
 
-def _to_result(tool_use_id: str, ret: str | dict) -> ToolResultBlock:
-    """func 返回值适配 ToolResultBlock.content: str→str; dict→[dict]。"""
+def _to_result(tool_use_id: str, ret: str | TextBlock | list[TextBlock]) -> ToolResultBlock:
+    """func 返回值适配 ToolResultBlock.content: str→str; TextBlock→[block]; list→list。"""
     if isinstance(ret, str):
         return ToolResultBlock(tool_use_id=tool_use_id, content=ret)
-    return ToolResultBlock(tool_use_id=tool_use_id, content=[ret])
+    if isinstance(ret, TextBlock):
+        return ToolResultBlock(tool_use_id=tool_use_id, content=[ret])
+    return ToolResultBlock(tool_use_id=tool_use_id, content=ret)
 
 
 class ToolExecutor(ABC):

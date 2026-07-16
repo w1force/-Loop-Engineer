@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Callable, Literal
 
+from .builtin_tools import builtin_tools
+from .builtin_tools.readstate import FileReadState
 from .loop.orchestrator import QueryParams, query_loop
 from .provider import Provider
 from .tools import Tool, default_can_use_tool
@@ -76,6 +78,11 @@ async def submit(
     messages: list[Message] = [*config.initial_messages, UserMessage(content=prompt)]
     await record_transcript(messages, config.transcript_path)  # 红线#5
 
+    # agent 级 FileReadState: read/write 工具工厂闭包共享同一实例(陈旧检测前提)。
+    # 追加到 config.tools 之后——调用者提供的工具与 builtin 工具共存(spec §3.3 方案 A, 不改 query_loop)。
+    read_state = FileReadState()
+    tools = [*config.tools, *builtin_tools(read_state)]
+
     params = QueryParams(
         messages=messages,
         system=config.system,
@@ -83,7 +90,7 @@ async def submit(
         max_tokens=config.max_tokens,
         provider=config.provider,
         abort_signal=config.abort_signal,
-        tools=config.tools,
+        tools=tools,
         max_turns=config.max_turns,
         can_use_tool=config.can_use_tool,
         tool_execution_mode=config.tool_execution_mode,
