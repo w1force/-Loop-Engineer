@@ -2,6 +2,7 @@
 
 全部 pydantic v2 —— 后续工具入参 schema 要用 `.model_json_schema()`。
 """
+from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
@@ -127,3 +128,11 @@ class State(BaseModel):
 # ── 常量(对齐真实项目 query.ts) ──
 MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3  # query.ts:164
 ESCALATED_MAX_TOKENS = 64_000  # 占位:按所用模型上限设定,Phase5 校准
+
+
+@dataclass
+class Tombstone:
+    """通知下游: turn_id 这一轮的流式 yield 作废(失败, 将重试或终止)。
+    下游收到后丢弃该 turn_id 已收的 StreamEvent/AssistantMessage。
+    重试/终止判断: 收到 tombstone 后有新轮(turn_id+1)=重试, loop 结束=终止。"""
+    turn_id: int

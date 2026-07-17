@@ -97,3 +97,12 @@ def test_state_network_retry_count_defaults_zero():
 
 def test_escalated_max_tokens_is_64000():
     assert ESCALATED_MAX_TOKENS == 64_000
+
+
+# ── Task 1: Tombstone(流式失败通知下游) ──
+from core.types import Tombstone
+
+
+def test_tombstone_holds_turn_id():
+    t = Tombstone(turn_id=3)
+    assert t.turn_id == 3

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+import logging
 from typing import Callable, Literal, cast
 
 from ..provider import Provider
@@ -23,15 +24,17 @@ from ..types import (
     StreamEvent,
     Terminal,
     TerminalReason,
+    Tombstone,
     UserMessage,
 )
 from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 from .phases.compact import maybe_compact
-from .phases.stream_turn import stream_turn
+from .phases.stream_turn import StreamOutcome, stream_turn
 from .recovery.rules import build_recovery_chain
 
+logger = logging.getLogger("query_loop")
 
 @dataclass
 class QueryParams:
@@ -58,12 +61,18 @@ def _emit_transition(tracer: Tracer, transition) -> None:
 
 async def query_loop(
     params: QueryParams, tracer: Tracer
-) -> AsyncIterator[Message | StreamEvent]:
-    """内层 agentic loop。业务异常在 while 内 catch → chain.handle_error → State 变换。"""
+) -> AsyncIterator[Message | StreamEvent | Tombstone]:
+    """内层 agentic loop。stream_turn 流式 + tombstone 通知下游失败轮。
+
+    业务异常在 while 内 catch → chain.handle_error → State 变换;
+    失败/abort 时 yield Tombstone(turn_id) 通知下游丢弃本轮已收 StreamEvent。
+    """
     state = State(messages=params.messages, turn_count=1)
     chain = build_recovery_chain()
+    turn_id = 0
 
     while True:
+        turn_id += 1                                          # ★ 每次 stream_turn(含重试)递增
         tracer.emit(TraceEvent(kind=TraceKind.TURN_START, turn=state.turn_count))
         state = await maybe_compact(state, params, tracer)
 
@@ -72,23 +81,38 @@ async def query_loop(
             params.tool_execution_mode, params.tools, params.can_use_tool, tracer, ctx
         )
         try:
-            outcome = await stream_turn(state, params, tracer, executor)
+            outcome: StreamOutcome | None = None
+            async for m in stream_turn(state, params, tracer, executor):
+                if isinstance(m, StreamOutcome):
+                    outcome = m                          # 元数据, 不向上 yield
+                else:
+                    yield m                              # ★ StreamEvent 实时透传下游
+                    if params.abort_signal.is_set():     # ★ abort in async for
+                        executor.discard()
+                        yield Tombstone(turn_id)
+                        _emit_transition(tracer, Terminal(reason=TerminalReason.USER_INTERRUPT))
+                        return
+            # stream_turn 末尾必 yield StreamOutcome(协议不变量); 命中此处说明已成功消费到底
+            assert outcome is not None
         except ProviderError as e:
             executor.discard()                                  # 清在途工具执行, 防泄漏
             decision = await chain.handle_error(state, e, params, tracer)
+            yield Tombstone(turn_id)                            # ★ 通知下游本轮作废
             _emit_transition(tracer, decision.transition)
             if isinstance(decision.transition, Terminal):
                 return
             if decision.next_state is None:
                 return
             state = decision.next_state
-            continue
+            continue                                            # 重试 = turn_id+1 新轮
 
         # stream_turn 成功 → 网络通, 清重试计数
         state.network_retry_count = 0
+        yield outcome.assistant_msgs[0]                  # ★ 整轮透传(供 submit; 替代累积版 yielded 间接)
 
-        for m in outcome.yielded:
-            yield m
+        # post-turn abort: stream_turn 已成功, 整轮(StreamEvent + AssistantMessage)已完整下发,
+        # 下游已 append 完整整轮——不 yield Tombstone(Tombstone 只用于 in-loop/except 的半截流作废)。
+        # 对比 in-loop abort(async for 内)走 except 路径, 那时本轮是半截流, 必须 yield Tombstone 丢弃。
         if params.abort_signal.is_set():
             executor.discard()
             _emit_transition(tracer, Terminal(reason=TerminalReason.USER_INTERRUPT))

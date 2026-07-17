@@ -17,6 +17,7 @@ from core.types import (
     AssistantMessage,
     StreamEvent,
     TerminalReason,
+    Tombstone,
     ToolResultBlock,
     UserMessage,
 )
@@ -361,4 +362,45 @@ async def test_withheld_path_discards_executor_tool_task(monkeypatch):
         pass
     assert hang_task.done(), "task 必须 done(被 cancel), 不得 orphan 悬挂"
     assert hang_task.cancelled(), "withheld 轮 tool task 必须被 cancel"
+
+
+# --- Task 3: tombstone(失败/abort 通知下游)+ turn_id ---
+
+
+async def test_network_retry_yields_tombstone(monkeypatch):
+    """失败重试: 第一轮抛异常 → yield Tombstone(turn_id=1) → 重试第二轮成功。"""
+    monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
+    provider = _ScriptedProvider([TransientProviderError("conn"), _text_events_async("ok")])
+    spy = SpyTracer()
+    out = [m async for m in query_loop(_params_with(provider), spy)]
+    tombstones = [m for m in out if isinstance(m, Tombstone)]
+    assert len(tombstones) == 1 and tombstones[0].turn_id == 1   # 失败轮 turn_id=1
+    assts = [m for m in out if isinstance(m, AssistantMessage)]
+    assert len(assts) == 1 and assts[0].content[0].text == "ok"  # 重试轮整轮  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_network_exhausted_yields_tombstone_then_return(monkeypatch):
+    """重试耗尽 → yield Tombstone(最后一个失败轮) → return。"""
+    monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
+    provider = _ScriptedProvider([TransientProviderError("x")] * 4)
+    spy = SpyTracer()
+    out = [m async for m in query_loop(_params_with(provider), spy)]
+    tombstones = [m for m in out if isinstance(m, Tombstone)]
+    assert len(tombstones) == 4   # 每个失败轮(turn_id 1-4: 初始 + 3 次重试)各一个 tombstone
+    # 无整轮(全失败)
+    assert not any(isinstance(m, AssistantMessage) for m in out)
+
+
+async def test_abort_yields_tombstone(monkeypatch):
+    """abort_signal 在 async for 内 → yield Tombstone + USER_INTERRUPT。"""
+    monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
+    provider = _ScriptedProvider([_text_events_async("ok")])
+    params = _params_with(provider)
+    params.abort_signal.set()   # 预置 abort
+    spy = SpyTracer()
+    out = [m async for m in query_loop(params, spy)]
+    # abort 在首个 StreamEvent 后触发 → tombstone
+    assert any(isinstance(m, Tombstone) for m in out)
+    transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
+    assert transitions[-1].payload["reason"] == "user_interrupt"
 

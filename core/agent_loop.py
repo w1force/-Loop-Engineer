@@ -19,9 +19,9 @@ from .transcript import record_transcript
 from .types import (
     AssistantMessage,
     Message,
+    StreamEvent,
+    Tombstone,
     TextBlock,
-    ToolUseBlock,
-    Usage,
     UserMessage,
 )
 from telemetry.tracer import Tracer
@@ -109,7 +109,12 @@ async def submit(
         elif isinstance(msg, UserMessage):
             messages.append(msg)
             await record_transcript(messages, config.transcript_path)
-        # StreamEvent: 无 UI,忽略(不持久化)
+        elif isinstance(msg, Tombstone):
+            # 本轮流式失败(没 yield 整轮), 不 append; 留位置供未来记日志/标记
+            continue
+        elif isinstance(msg, StreamEvent):
+            # 流式 token 事件; 本期无 UI 暂不处理, 留位置供未来实时显示/hook
+            continue
 
         if config.max_budget_usd is not None:
             if _rough_cost(total_in, total_out) >= config.max_budget_usd:

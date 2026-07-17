@@ -80,3 +80,45 @@ async def test_submit_success_writes_transcript(tmp_path):
     # transcript 落盘:含 user + assistant
     roles = [json.loads(line)["role"] for line in path.read_text(encoding="utf-8").splitlines()]
     assert "user" in roles and "assistant" in roles
+
+
+def _assistant_msg(text: str) -> AssistantMessage:
+    """最小整轮 AssistantMessage(stop_reason=end_turn 视为成功)。"""
+    return AssistantMessage(content=[TextBlock(text=text)], stop_reason="end_turn")
+
+
+class _NoopProvider:
+    """空 provider stub: query_loop 被 mock 时不会被真正调用。"""
+
+    def stream(self, **kwargs):  # pragma: no cover - 仅满足 QueryParams 类型
+        raise NotImplementedError
+
+    def count_tokens(self, messages) -> int:  # pragma: no cover
+        return 0
+
+
+async def test_submit_handles_tombstone_and_stream_event(monkeypatch, tmp_path):
+    """submit 对 Tombstone(不 append)和 StreamEvent(留空 continue)都有显式分支, 不崩。"""
+    from core.agent_loop import AgentConfig, submit
+    from core.types import Tombstone, StreamEvent
+
+    # mock query_loop 产出: StreamEvent + Tombstone + AssistantMessage
+    async def _fake_query_loop(params, tracer):
+        yield StreamEvent(type="message_start")
+        yield Tombstone(turn_id=1)              # 模拟第一轮失败
+        yield _assistant_msg("ok")              # 模拟重试轮整轮
+
+    monkeypatch.setattr("core.agent_loop.query_loop", _fake_query_loop)
+
+    provider = _NoopProvider()
+    config = AgentConfig(
+        provider=provider,
+        system="",
+        model="m",
+        max_tokens=16,
+        transcript_path=str(tmp_path / "t.jsonl"),
+    )
+    results = [r async for r in submit("hi", config, NoopTracer())]
+    # submit 不因 Tombstone/StreamEvent 崩, 最终 success
+    assert any(r.get("type") == "result" for r in results)
+    assert results[-1]["subtype"] == "success"
