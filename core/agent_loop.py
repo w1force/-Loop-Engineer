@@ -14,6 +14,7 @@ from .builtin_tools import builtin_tools
 from .builtin_tools.readstate import FileReadState
 from .loop.orchestrator import QueryParams, query_loop
 from .provider import Provider
+from .skills import prepare_skills
 from .tools import Tool, default_can_use_tool
 from .transcript import record_transcript
 from .types import (
@@ -41,6 +42,7 @@ class AgentConfig:
     max_budget_usd: float | None = None
     transcript_path: str = "transcript.jsonl"
     tool_execution_mode: Literal["streaming", "batch"] = "streaming"
+    skill_dirs: list[str] = field(default_factory=lambda: ["skills/"])
 
 
 def is_result_successful(msg, stop_reason: str | None) -> bool:
@@ -83,9 +85,11 @@ async def submit(
     read_state = FileReadState()
     tools = [*config.tools, *builtin_tools(read_state)]
 
+    system, tools = prepare_skills(config.skill_dirs, config.system, tools)  # ★ skill 注入
+
     params = QueryParams(
         messages=messages,
-        system=config.system,
+        system=system,
         model=config.model,
         max_tokens=config.max_tokens,
         provider=config.provider,
