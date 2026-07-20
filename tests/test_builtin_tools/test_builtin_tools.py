@@ -5,16 +5,15 @@ glob/grep 对本仓库自身实跑(pytest cwd = 项目根),并经统一入口 ex
 """
 import asyncio
 
-import pytest
 from pydantic import BaseModel
 
 from core.builtin_tools import GLOB_TOOL, GREP_TOOL
-from core.builtin_tools.glob import GlobInput, glob
-from core.builtin_tools.grep import GrepInput, grep
+from core.builtin_tools.glob import glob
+from core.builtin_tools.grep import grep
 from core.registry import get_all_base_tools, get_tools
 from core.tool_executor import make_executor
 from core.tools import Tool, ToolContext, build_tool, default_can_use_tool
-from core.types import ToolUseBlock
+from core.types import AgentState, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -96,12 +95,14 @@ async def test_grep_no_match_returns_empty():
 
 # ── 端到端:经统一入口 executor 执行 ─────────────────────
 async def _run_via_executor(tool: Tool, block: ToolUseBlock) -> str:
-    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
     ex = make_executor("batch", [tool], default_can_use_tool, NoopTracer(), ctx)
     ex.add_tool(block)
     results = await ex.get_results()
     assert len(results) == 1
-    return results[0].content
+    content = results[0].content
+    assert isinstance(content, str)  # 工具 func 返回 str;收窄 pyright union
+    return content
 
 
 async def test_glob_through_unified_executor():
@@ -125,7 +126,7 @@ async def test_grep_through_unified_executor():
 
 async def test_executor_schema_validation_error_via_bad_input():
     # pattern 缺失 → model_validate 失败 → is_error(对齐统一入口的 schema 守卫)
-    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
     ex = make_executor("batch", [GLOB_TOOL], default_can_use_tool, NoopTracer(), ctx)
     ex.add_tool(ToolUseBlock(id="c3", name="Glob", input={"path": "."}))
     results = await ex.get_results()

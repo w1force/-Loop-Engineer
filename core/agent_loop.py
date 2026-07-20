@@ -19,7 +19,8 @@ import logging
 import os
 from typing import Callable, Literal
 
-from .builtin_tools import builtin_tools
+from core.registry import get_tools
+
 from .loop.orchestrator import QueryParams, query_loop
 from .provider import Provider
 from .skills.loader import SkillLoader
@@ -139,7 +140,7 @@ async def submit(
     # Task 4: skill 目录从 agent_state.skills(build_agent_state 已扫描)拼到 system。
     # Task 3: builtin_tools() 无参(func 从 ctx.agent_state 取,含 load_skill_tool)。
     system = build_system_prompt(agent_state, config)
-    tools = [*config.tools, *builtin_tools()]
+    tools = get_tools(False)    # 获取工具 
 
     params = QueryParams(
         system=system,
