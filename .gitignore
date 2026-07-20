@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-vm/
 
 # 本地环境变量(含 API key)
 .env
@@ -21,3 +22,4 @@ main-lwt.py
 
 # 临时文件夹
 tmp-dir/
+*.log

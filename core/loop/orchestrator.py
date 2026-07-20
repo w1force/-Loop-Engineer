@@ -60,6 +60,7 @@ async def query_loop(
 ) -> AsyncIterator[Message | StreamEvent]:
     """内层 agentic loop。yield 消息给外层;完成时 return(附 Terminal 语义)。"""
     state = State(messages=params.messages, turn_count=1)
+    #回扣机制
     chain = build_recovery_chain()
 
     while True:
@@ -69,8 +70,7 @@ async def query_loop(
         state = await maybe_compact(state, params, tracer)
 
         # phase 2: 流式调 LLM + 聚合(边聚合边打点)
-        # 每轮新建 ctx + executor:executor 接 stream_turn 的 block 级 tool_use,
-        # 机会主义调度(streaming)或攒批(batch)。
+        # ctx：工具执行时框架提供的运行时上下文
         ctx = ToolContext(tracer=tracer, abort_signal=params.abort_signal, state=state)
         executor = make_executor(
             params.tool_execution_mode, params.tools, params.can_use_tool, tracer, ctx
@@ -86,12 +86,10 @@ async def query_loop(
         # phase 3: 分叉。needs_follow_up → 收工具结果回灌内联;否则交给责任链
         if outcome.needs_follow_up:
             tool_results = await executor.get_results()  # 收尾:保证全执行完,保序
+            tr_msg = UserMessage(content=cast(list[ContentBlock], tool_results))
+            yield tr_msg  # 让外层持久化 tool_results(transcript 完整 + 可 resume)
             base = state.model_dump()
-            base["messages"] = (
-                state.messages
-                + outcome.assistant_msgs
-                + [UserMessage(content=cast(list[ContentBlock], tool_results))]
-            )
+            base["messages"] = state.messages + outcome.assistant_msgs + [tr_msg]
             base["turn_count"] = state.turn_count + 1
             base["transition"] = Continue(reason=ContinueReason.NEXT_TURN)
             state = State(**base)
