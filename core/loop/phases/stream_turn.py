@@ -10,11 +10,11 @@ import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from ...types import (
     AssistantMessage,
-    State,
+    QueryState,
     StreamEvent,
     TextBlock,
     ToolUseBlock,
@@ -109,34 +109,34 @@ async def aggregate_stream(
 
 
 class StreamOutcome(BaseModel):
-    """phase 之间传递的中间结果(避免 phase 直接改 state)。"""
+    """phase 之间传递的中间结果(流式版: 不再累积 yielded)。"""
 
     assistant_msgs: list[AssistantMessage]
     tool_calls: list[ToolUseBlock]
     needs_follow_up: bool
     stop_reason: str | None = None
     withheld: str | None = None  # None | "max_output_tokens" (prompt_too_long 走异常路径)
-    yielded: list = Field(default_factory=list)  # 透传给外层的 Message | StreamEvent
+    # yielded 删除 —— 流式不累积, 整轮在 assistant_msgs + query_loop 显式 yield
 
 
 async def stream_turn(
-    state: State,
+    agent_state,          # ★ Task 2 新增(本期内部不用,预留;messages 仍走 state.messages)
+    state: QueryState,
     params: "QueryParams",
     tracer: Tracer,
     executor: "ToolExecutor | None",
-) -> StreamOutcome:
-    """调 provider.stream → aggregate_stream → 喂 executor + 组装整轮 AssistantMessage。
+):  # 不再 -> StreamOutcome(async generator)
+    """调 provider.stream → aggregate_stream → 喂 executor + 组装整轮。
 
-    - StreamEvent: 透传到 yielded;message_delta 时取 stop_reason/usage;
-    - block 级 AssistantMessage(aggregate_stream 每 content_block_stop 产一条):
-      累积到 all_blocks;若是 ToolUseBlock 则 executor.add_tool(机会主义,block 一到即喂)
-      + 收集 tool_calls + 置 needs_follow_up=True;block 级本身**不进 yielded**;
-    - 遍历结束组装一条整轮 AssistantMessage(content=all_blocks, usage, stop_reason)
-      追加到 yielded 末尾。
+    流式版: 中途 yield StreamEvent(实时透传), 末尾 yield StreamOutcome(元数据, 替代 return)。
+    async generator 不能 return value, 元数据用末尾 yield StreamOutcome 传出。
 
     needs_follow_up 只看有没有 ToolUseBlock,不看 stop_reason(红线#2)。
     withheld = "max_output_tokens" iff stop_reason == "max_tokens"(权威信号来自
     message_delta, 必到; prompt_too_long 走异常路径不产生 withheld)。
+
+    Task 2: agent_state 入参为后续 phase 工具接线预留(本期内部仍用 state.messages,
+    因 QueryState(messages=agent_state.messages) 引用同一 list)。
     """
     max_tokens = state.max_output_tokens_override or params.max_tokens
     events = params.provider.stream(
@@ -153,17 +153,16 @@ async def stream_turn(
     needs_follow_up = False
     stop_reason: str | None = None
     usage = Usage()
-    yielded: list = []
     async for item in aggregate_stream(events, tracer):
         if isinstance(item, StreamEvent):
-            yielded.append(item)
+            yield item                                    # ★ 流式透传(原累积到 yielded)
             if item.type == "message_delta":  # 取 stop_reason/usage
                 d = item.delta or {}
                 if "stop_reason" in d:
                     stop_reason = d["stop_reason"]
                 if item.message and "usage" in item.message:
                     usage = Usage(**item.message["usage"])
-        else:  # block 级 AssistantMessage(内部累积,不进 yielded)
+        else:  # block 级 AssistantMessage(内部累积, 不 yield)
             block = item.content[0]
             all_blocks.append(block)
             if isinstance(block, ToolUseBlock):
@@ -177,14 +176,11 @@ async def stream_turn(
     if stop_reason == "max_tokens":
         withheld = "max_output_tokens"
 
-    # 组装整轮追加到 yielded 末尾(block 级不进 yielded,只发整轮)
     full = AssistantMessage(content=all_blocks, usage=usage, stop_reason=stop_reason)
-    yielded.append(full)
-    return StreamOutcome(
+    yield StreamOutcome(                                  # ★ 末尾 yield 元数据(替代 return)
         assistant_msgs=[full],
         tool_calls=tool_calls,
         needs_follow_up=needs_follow_up,
         stop_reason=stop_reason,
         withheld=withheld,
-        yielded=yielded,
     )

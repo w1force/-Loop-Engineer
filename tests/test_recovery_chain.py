@@ -13,7 +13,7 @@ from core.types import (
     AssistantMessage,
     ContinueReason,
     ESCALATED_MAX_TOKENS,
-    State,
+    QueryState,
     Terminal,
     TerminalReason,
     TextBlock,
@@ -41,7 +41,7 @@ def _outcome(withheld=None) -> StreamOutcome:
 
 async def test_no_withheld_falls_through_to_completed():
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")])
+    state = QueryState(messages=[UserMessage(content="hi")])
     decision = await chain.handle(state, _outcome(None), params=None, tracer=NoopTracer())
     assert isinstance(decision.transition, Terminal)
     assert decision.transition.reason is TerminalReason.COMPLETED
@@ -50,7 +50,7 @@ async def test_no_withheld_falls_through_to_completed():
 async def test_completed_rule_emits_recovery_attempt():
     spy = SpyTracer()
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")])
+    state = QueryState(messages=[UserMessage(content="hi")])
     await chain.handle(state, _outcome(None), params=None, tracer=spy)
     hits = [
         e
@@ -63,7 +63,7 @@ async def test_completed_rule_emits_recovery_attempt():
 async def test_stub_rules_never_match_when_no_withheld():
     # Phase 1 两条桩规则 match 恒 False(因为 withheld 恒 None),不会命中抛错
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")])
+    state = QueryState(messages=[UserMessage(content="hi")])
     # 多次 handle 都应安全落到 CompletedRule
     for _ in range(3):
         d = await chain.handle(state, _outcome(None), params=None, tracer=NoopTracer())
@@ -73,7 +73,7 @@ async def test_stub_rules_never_match_when_no_withheld():
 async def test_handle_error_fallback_terminal_model_error():
     """无错误规则匹配时, handle_error 兜底返回 Terminal(MODEL_ERROR)。"""
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")])
+    state = QueryState(messages=[UserMessage(content="hi")])
     d = await chain.handle_error(
         state, ProviderError("x"), params=None, tracer=NoopTracer())
     assert isinstance(d.transition, Terminal)
@@ -92,7 +92,7 @@ def _outcome_max_tokens(tool_calls=None) -> StreamOutcome:
 
 async def test_max_tokens_escalate_first_time():
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")])
+    state = QueryState(messages=[UserMessage(content="hi")])
     d = await chain.handle(state, _outcome_max_tokens(), params=None, tracer=NoopTracer())
     assert d.transition.reason is ContinueReason.MAX_OUTPUT_TOKENS_ESCALATE
     assert d.next_state is not None
@@ -101,7 +101,7 @@ async def test_max_tokens_escalate_first_time():
 
 async def test_max_tokens_recovery_injects_meta_and_placeholders():
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")],
+    state = QueryState(messages=[UserMessage(content="hi")],
                   max_output_tokens_override=ESCALATED_MAX_TOKENS)  # 已升档 → 进续写
     tc = [ToolUseBlock(id="c1", name="get", input={"x": 1})]
     d = await chain.handle(state, _outcome_max_tokens(tool_calls=tc),
@@ -122,7 +122,7 @@ async def test_max_tokens_recovery_injects_meta_and_placeholders():
 
 async def test_max_tokens_recovery_no_tool_calls_skips_placeholder():
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")],
+    state = QueryState(messages=[UserMessage(content="hi")],
                   max_output_tokens_override=ESCALATED_MAX_TOKENS)
     d = await chain.handle(state, _outcome_max_tokens(tool_calls=[]),
                            params=None, tracer=NoopTracer())
@@ -134,7 +134,7 @@ async def test_max_tokens_recovery_no_tool_calls_skips_placeholder():
 
 async def test_max_tokens_exhausted_after_three_recovery():
     chain = build_recovery_chain()
-    state = State(messages=[UserMessage(content="hi")],
+    state = QueryState(messages=[UserMessage(content="hi")],
                   max_output_tokens_override=ESCALATED_MAX_TOKENS,
                   max_output_tokens_recovery_count=3)  # 已耗尽
     d = await chain.handle(state, _outcome_max_tokens(), params=None, tracer=NoopTracer())
@@ -145,7 +145,7 @@ async def test_max_tokens_exhausted_after_three_recovery():
 # ── Task 8: 错误规则 NetworkRetry / PromptTooLong / ModelError ──
 
 def _state(retry=0):
-    return State(messages=[UserMessage(content="hi")], network_retry_count=retry)
+    return QueryState(messages=[UserMessage(content="hi")], network_retry_count=retry)
 
 
 async def test_network_retry_under_limit(monkeypatch):

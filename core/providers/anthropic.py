@@ -101,7 +101,7 @@ class AnthropicAdapter(BaseAdapter, Provider):
             "stream": True,
         }
 
-        logger.debug("request body: " + json.dumps(req_body, ensure_ascii=False))
+        logger.debug("request body: " + json.dumps(req_body, ensure_ascii=False, indent=2))
         try:
             async with self.http.stream("POST", "/v1/messages", json=req_body) as r:
                 _t0 = time.perf_counter()  # 计时基准(仅 self._debug_sse 用)

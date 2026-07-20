@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from core.tools import Tool, ToolContext, default_can_use_tool
 from core.tool_executor.batch import BatchToolExecutor
-from core.types import ToolUseBlock
+from core.types import AgentState, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -21,7 +21,7 @@ def _tool(name, safe, func):
 
 
 def _ctx():
-    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
 
 
 def test_partition_consecutive_safe_batched_unsafe_alone():

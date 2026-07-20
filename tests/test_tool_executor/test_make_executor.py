@@ -4,11 +4,12 @@ import asyncio
 from core.tool_executor import BatchToolExecutor, StreamingToolExecutor, make_executor
 from core.tool_executor.base import ToolExecutor
 from core.tools import ToolContext, default_can_use_tool
+from core.types import AgentState
 from telemetry.tracer import NoopTracer
 
 
 def _ctx():
-    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
 
 
 def test_make_executor_streaming():

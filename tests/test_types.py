@@ -7,7 +7,7 @@ from core.types import (
     AssistantMessage,
     Continue,
     ContinueReason,
-    State,
+    QueryState,
     StreamEvent,
     Terminal,
     TerminalReason,
@@ -44,7 +44,7 @@ def test_messages_str_and_list_content():
 
 
 def test_state_transition_and_roundtrip():
-    s = State(
+    s = QueryState(
         messages=[UserMessage(content="hi")],
         turn_count=1,
         transition=Continue(reason=ContinueReason.NEXT_TURN),
@@ -52,7 +52,7 @@ def test_state_transition_and_roundtrip():
     assert s.transition.reason is ContinueReason.NEXT_TURN
     # round-trip: union 消息 + transition 都能 dump 后重建
     dumped = s.model_dump()
-    s2 = State(**dumped)
+    s2 = QueryState(**dumped)
     assert s2.turn_count == 1
     assert isinstance(s2.transition, Continue)
     assert s2.transition.reason is ContinueReason.NEXT_TURN
@@ -91,9 +91,44 @@ def test_user_interrupt_replaces_aborted():
 
 
 def test_state_network_retry_count_defaults_zero():
-    s = State(messages=[UserMessage(content="hi")])
+    s = QueryState(messages=[UserMessage(content="hi")])
     assert s.network_retry_count == 0
 
 
 def test_escalated_max_tokens_is_64000():
     assert ESCALATED_MAX_TOKENS == 64_000
+
+
+# ── Task 1: Tombstone(流式失败通知下游) ──
+from core.types import Tombstone
+
+
+def test_tombstone_holds_turn_id():
+    t = Tombstone(turn_id=3)
+    assert t.turn_id == 3
+
+
+# ── agent_state 重构 Task 1: AgentState / QueryState 改名 / SkillMeta 移入 ──
+from pathlib import Path  # noqa: E402
+
+from core.types import AgentState, SkillMeta  # noqa: E402
+
+
+def test_agent_state_defaults():
+    a = AgentState()
+    assert a.messages == []
+    assert a.skills == []
+    assert a.total_input_tokens == 0
+    assert a.total_output_tokens == 0
+    assert a.cwd == ""
+
+
+def test_query_state_keeps_messages():
+    q = QueryState(messages=[UserMessage(content="hi")])
+    assert q.turn_count == 1
+    assert len(q.messages) == 1
+
+
+def test_skill_meta_in_types():
+    m = SkillMeta(name="x", description="d", skill_dir=Path("/x"), skill_md=Path("/x/SKILL.md"))
+    assert m.name == "x"

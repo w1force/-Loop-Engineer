@@ -4,11 +4,12 @@ asyncio_mode=auto: 测试用 async def + 直接 await, 不用 run_until_complete
 """
 import asyncio
 
+import pytest
 from pydantic import BaseModel
 
 from core.tools import CanUseDecision, Tool, ToolContext, default_can_use_tool
-from core.tool_executor.base import ToolExecutor
-from core.types import ToolResultBlock, ToolUseBlock
+from core.tool_executor.base import ToolExecutor, _to_result
+from core.types import AgentState, TextBlock, ToolResultBlock, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -16,8 +17,8 @@ class _In(BaseModel):
     city: str
 
 
-async def _ok(inp: _In, ctx) -> dict:
-    return {"weather": f"{inp.city}: 晴"}
+async def _ok(inp: _In, ctx) -> str:
+    return f"{inp.city}: 晴"
 
 
 async def _boom(inp: _In, ctx) -> str:
@@ -29,7 +30,7 @@ async def _deny(tc: ToolUseBlock):
 
 
 def _ctx() -> ToolContext:
-    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
 
 
 def _new_executor(tools=None, can_use_tool=default_can_use_tool):
@@ -53,7 +54,7 @@ async def test_register_and_get_results_str_ok():
     ex.add_tool(_block())
     results = await ex.get_results()
     assert len(results) == 1
-    assert results[0] == ToolResultBlock(tool_use_id="c1", content=[{"weather": "巴黎: 晴"}])
+    assert results[0] == ToolResultBlock(tool_use_id="c1", content="巴黎: 晴")
 
 
 async def test_unknown_tool_produces_error_in_add_tool():
@@ -215,3 +216,25 @@ async def test_cancelled_keeps_placeholder_result():
     results = await ex.get_results()
     assert len(results) == 1
     assert results[0].is_error is True
+
+
+def test_to_result_str():
+    r = _to_result("c1", "hello")
+    assert r.tool_use_id == "c1"
+    assert r.content == "hello"
+
+
+def test_to_result_single_textblock():
+    r = _to_result("c1", TextBlock(text="hi"))
+    assert r.content == [TextBlock(text="hi")]
+
+
+def test_to_result_list_textblock():
+    r = _to_result("c1", [TextBlock(text="a"), TextBlock(text="b")])
+    assert r.content == [TextBlock(text="a"), TextBlock(text="b")]
+
+
+def test_tool_result_block_rejects_arbitrary_dict():
+    """收窄后, 任意 dict 不是合法 content block → pydantic 校验拒绝。"""
+    with pytest.raises(Exception):
+        ToolResultBlock(tool_use_id="c1", content=[{"filenames": ["a", "b"]}])  # type: ignore[reportArgumentType]  # 故意传非法 dict 验证运行时拒绝

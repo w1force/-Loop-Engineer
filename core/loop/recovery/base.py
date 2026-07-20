@@ -9,7 +9,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from ...types import Continue, State, Terminal, TerminalReason
+from ...types import Continue, QueryState, Terminal, TerminalReason
 from ...provider_errors import ProviderError
 from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
@@ -19,26 +19,26 @@ from ..phases.stream_turn import StreamOutcome
 
 class Decision(BaseModel):
     transition: Continue | Terminal
-    next_state: State | None = None  # Continue 时给出重建后的 state
+    next_state: QueryState | None = None  # Continue 时给出重建后的 state
 
 
 class TransitionRule(Protocol):
     name: str
 
-    def match(self, state: State, outcome: StreamOutcome) -> bool: ...
+    def match(self, state: QueryState, outcome: StreamOutcome) -> bool: ...
 
     async def apply(
-        self, state: State, outcome: StreamOutcome, params, tracer: Tracer
+        self, state: QueryState, outcome: StreamOutcome, params, tracer: Tracer
     ) -> Decision: ...
 
 
 class ErrorRule(Protocol):
     name: str
 
-    def match(self, state: State, err: ProviderError) -> bool: ...
+    def match(self, state: QueryState, err: ProviderError) -> bool: ...
 
     async def apply(
-        self, state: State, err: ProviderError, params, tracer: Tracer
+        self, state: QueryState, err: ProviderError, params, tracer: Tracer
     ) -> Decision: ...
 
 

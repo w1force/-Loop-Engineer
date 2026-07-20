@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",
     "aiofiles>=23",
+    "pyyaml>=6",
 ]
 
 [dependency-groups]

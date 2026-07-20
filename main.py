@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 from config import get_settings
-from core.agent_loop import AgentConfig, submit
+from core.agent_loop import AgentConfig, build_agent_state, submit
 from core.providers.anthropic import AnthropicAdapter
 from core.registry import get_tools
 from telemetry.tracer import LoggingTracer
