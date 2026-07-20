@@ -1,78 +1,110 @@
-"""Task 4: skill 注入逻辑(prepare_skills)测试。
+"""Task 4: build_agent_state + build_system_prompt 测试。
 
-prepare_skills 是纯函数,覆盖注入/降级/拼接;submit 接线靠 pyright + Task 5 冒烟。
+Task 4 退役 prepare_skills 后,skill 注入逻辑分两段:
+- build_agent_state(config):scan skills + 新建 FileReadState + 设 cwd + 迁移 initial_messages
+- build_system_prompt(agent_state, config):config.system + skill 目录(从 agent_state.skills)
 """
-from pydantic import BaseModel
+from pathlib import Path
 
-from core.skills import prepare_skills
-from core.tools import Tool
-
-
-class _DummyIn(BaseModel):
-    pass
+from core.agent_loop import AgentConfig, build_agent_state, build_system_prompt
+from core.types import AgentState, SkillMeta, UserMessage
 
 
-def _dummy_tool(name: str) -> Tool:
-    async def _f(inp, ctx):
-        return "ok"
-    return Tool(name=name, description="d", input_model=_DummyIn, func=_f)
+class _NoopProvider:
+    """空 provider stub:build_agent_state/build_system_prompt 不触达 provider。"""
+
+    def stream(self, **kwargs):  # pragma: no cover - 仅满足 Provider 协议
+        raise NotImplementedError
+
+    def count_tokens(self, messages) -> int:  # pragma: no cover
+        return 0
 
 
-def test_prepare_skills_injects(tmp_path):
+def test_build_agent_state_scans_skills(tmp_path):
     skills = tmp_path / "skills"
-    d = skills / "foo"; d.mkdir(parents=True)
+    d = skills / "foo"
+    d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\ndescription: foo\n---\n# foo\n", encoding="utf-8")
-    existing = [_dummy_tool("read")]
-    system, tools = prepare_skills([skills], "base system", existing)
-    assert "<skills>" in system
-    assert "foo" in system
-    assert any(t.name == "load_skill" for t in tools)
-    assert any(t.name == "read" for t in tools)  # 原工具保留
+    cfg = AgentConfig(
+        provider=_NoopProvider(), system="base", model="m", max_tokens=100,
+        skill_dirs=[str(skills)], cwd=str(tmp_path),
+    )
+    astate = build_agent_state(cfg)
+    assert len(astate.skills) == 1 and astate.skills[0].name == "foo"
+    assert astate.cwd == str(tmp_path)
+    assert astate.messages == []
 
 
-def test_prepare_skills_empty_dirs_noop():
-    existing = [_dummy_tool("read")]
-    system, tools = prepare_skills([], "base", existing)
-    assert system == "base"
-    assert tools == existing
+def test_build_agent_state_scan_failure_degrades(tmp_path):
+    cfg = AgentConfig(
+        provider=_NoopProvider(), system="base", model="m", max_tokens=100,
+        skill_dirs=[str(tmp_path / "nope")],
+    )
+    astate = build_agent_state(cfg)
+    assert astate.skills == []   # 降级
 
 
-def test_prepare_skills_nonexistent_dir_noop(tmp_path):
-    existing = [_dummy_tool("read")]
-    system, tools = prepare_skills([tmp_path / "nope"], "base", existing)
-    assert system == "base"
-    assert tools == existing
+def test_build_agent_state_migrates_initial_messages(tmp_path):
+    """initial_messages 迁移到 agent_state.messages(解决 Task 2 死字段 concern)。"""
+    msg = UserMessage(content="seed")
+    cfg = AgentConfig(
+        provider=_NoopProvider(), system="base", model="m", max_tokens=100,
+        initial_messages=[msg],
+    )
+    astate = build_agent_state(cfg)
+    assert astate.messages == [msg]
 
 
-def test_prepare_skills_str_system(tmp_path):
-    skills = tmp_path / "skills"
-    d = skills / "foo"; d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\ndescription: foo\n---\n# foo\n", encoding="utf-8")
-    system, _ = prepare_skills([skills], "abc", [])
-    assert isinstance(system, str)
-    assert system.startswith("abc")
+def test_build_agent_state_has_fresh_file_read_state(tmp_path):
+    cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
+    astate = build_agent_state(cfg)
+    # FileReadState 默认空:read 没记录 → get 返回 None
+    assert astate.file_read_state.get("/nope") is None
 
 
-def test_prepare_skills_list_system(tmp_path):
-    skills = tmp_path / "skills"
-    d = skills / "foo"; d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\ndescription: foo\n---\n# foo\n", encoding="utf-8")
+def test_build_system_prompt_empty_skills():
+    astate = AgentState(skills=[])
+    cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
+    assert build_system_prompt(astate, cfg) == "base"
+
+
+def test_build_system_prompt_str():
+    m = SkillMeta(name="foo", description="d", skill_dir=Path("/x"), skill_md=Path("/x/SKILL.md"))
+    astate = AgentState(skills=[m])
+    cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
+    out = build_system_prompt(astate, cfg)
+    assert isinstance(out, str) and out.startswith("base") and "<skills>" in out and "foo" in out
+
+
+def test_build_system_prompt_list():
+    m = SkillMeta(name="foo", description="d", skill_dir=Path("/x"), skill_md=Path("/x/SKILL.md"))
+    astate = AgentState(skills=[m])
+    cfg = AgentConfig(
+        provider=_NoopProvider(), system=[{"type": "text", "text": "a"}], model="m", max_tokens=100,
+    )
+    out = build_system_prompt(astate, cfg)
+    assert isinstance(out, list) and out[0] == {"type": "text", "text": "a"}
+    assert "<skills>" in out[-1]["text"]
+
+
+def test_build_system_prompt_empty_skills_list_passthrough():
+    """空 skills + list[dict] system 也原样返回。"""
+    astate = AgentState(skills=[])
     base = [{"type": "text", "text": "a"}]
-    system, _ = prepare_skills([skills], base, [])
-    assert isinstance(system, list)
-    assert system[0] == {"type": "text", "text": "a"}
-    assert system[-1]["type"] == "text"
-    assert "<skills>" in system[-1]["text"]
+    cfg = AgentConfig(provider=_NoopProvider(), system=base, model="m", max_tokens=100)
+    out = build_system_prompt(astate, cfg)
+    assert out is base
 
 
-def test_prepare_skills_scan_exception_degrades(monkeypatch, tmp_path):
-    from core.skills import loader as loader_mod
-
-    def _boom(_dirs):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(loader_mod.SkillLoader, "scan", _boom)
-    existing = [_dummy_tool("read")]
-    system, tools = prepare_skills([tmp_path], "base", existing)
-    assert system == "base"  # 降级:不注入
-    assert tools == existing
+def test_build_system_prompt_description_whitespace_collapsed():
+    """description 多行空白压缩成单行。"""
+    m = SkillMeta(
+        name="foo",
+        description="line one\n  line two",
+        skill_dir=Path("/x"),
+        skill_md=Path("/x/SKILL.md"),
+    )
+    astate = AgentState(skills=[m])
+    cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
+    out = build_system_prompt(astate, cfg)
+    assert "line one line two" in out

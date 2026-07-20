@@ -20,8 +20,7 @@ from ...types import (
     ContentBlock,
     Continue,
     ContinueReason,
-    Message,
-    State,
+    QueryState,
     Terminal,
     TerminalReason,
     UserMessage,
@@ -42,7 +41,7 @@ class CompletedRule:
 
     name = "completed"
 
-    def match(self, state: State, outcome: StreamOutcome) -> bool:
+    def match(self, state: QueryState, outcome: StreamOutcome) -> bool:
         return True  # 兜底
 
     async def apply(self, state, outcome, params, tracer: Tracer) -> Decision:
@@ -54,7 +53,7 @@ class MaxOutputTokensRule:
 
     name = "max_output_tokens"
 
-    def match(self, state: State, outcome: StreamOutcome) -> bool:
+    def match(self, state: QueryState, outcome: StreamOutcome) -> bool:
         return outcome.withheld == "max_output_tokens"
 
     async def apply(self, state, outcome, params, tracer: Tracer) -> Decision:
@@ -70,18 +69,17 @@ class MaxOutputTokensRule:
         # 第二档: 注入续写消息 —— 本轮完成块 + 占位 result + meta
         if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT:
             turn_assistant = outcome.assistant_msgs[0]
-            new_msgs: list[Message] = [turn_assistant]
+            state.messages.append(turn_assistant)           # ★ 原地(原 model_copy update messages)
             if outcome.tool_calls:
                 placeholders: list[ContentBlock] = [_placeholder(tc) for tc in outcome.tool_calls]
-                new_msgs.append(UserMessage(content=placeholders))
-            new_msgs.append(UserMessage(content=_META_RESUME))
+                state.messages.append(UserMessage(content=placeholders))  # ★ 原地
+            state.messages.append(UserMessage(content=_META_RESUME))      # ★ 原地
             return Decision(
                 transition=Continue(reason=ContinueReason.MAX_OUTPUT_TOKENS_RECOVERY),
                 next_state=state.model_copy(update={
-                    "messages": state.messages + new_msgs,
                     "max_output_tokens_recovery_count":
-                        state.max_output_tokens_recovery_count + 1,
-                }),
+                    state.max_output_tokens_recovery_count + 1,
+                }),   # ★ 不 update messages(引用保持 agent_state.messages)
             )
         # 耗尽
         return Decision(transition=Terminal(
@@ -101,7 +99,7 @@ class NetworkRetryRule:
 
     name = "network_retry"
 
-    def match(self, state: State, err: ProviderError) -> bool:
+    def match(self, state: QueryState, err: ProviderError) -> bool:
         return isinstance(err, TransientProviderError)
 
     async def apply(self, state, err, params, tracer) -> Decision:
@@ -122,7 +120,7 @@ class PromptTooLongErrorRule:
 
     name = "prompt_too_long"
 
-    def match(self, state: State, err: ProviderError) -> bool:
+    def match(self, state: QueryState, err: ProviderError) -> bool:
         return isinstance(err, PromptTooLongError)
 
     async def apply(self, state, err, params, tracer) -> Decision:
@@ -135,7 +133,7 @@ class ModelErrorRule:
 
     name = "model_error"
 
-    def match(self, state: State, err: ProviderError) -> bool:
+    def match(self, state: QueryState, err: ProviderError) -> bool:
         return isinstance(err, FatalProviderError)
 
     async def apply(self, state, err, params, tracer) -> Decision:

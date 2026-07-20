@@ -1,5 +1,8 @@
 # core/builtin_tools/glob.py
-"""Glob 工具: 按文件名 pattern 匹配(只读, 并发安全)。"""
+"""Glob 工具: 按文件名 pattern 匹配(只读, 并发安全)。
+
+Task 3 起 工厂无参: func 从 ctx.agent_state.cwd 取(原闭包退场)。
+"""
 from __future__ import annotations
 
 import os
@@ -23,8 +26,9 @@ class GlobIn(BaseModel):
     path: str | None = None
 
 
-def glob_tool(cwd: str | None = None) -> Tool:
+def glob_tool() -> Tool:
     async def _glob(inp: GlobIn, ctx: ToolContext) -> str:
+        cwd = ctx.agent_state.cwd   # ★ 从 ctx 取(原闭包)
         base = Path(inp.path) if inp.path else Path(cwd or os.getcwd())
         files: list[str] = []
         for p in base.glob(inp.pattern):

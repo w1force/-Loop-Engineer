@@ -1,6 +1,9 @@
 """orchestrator: respx mock Anthropic 纯文本 SSE → query_loop 走 completed。
 
 断言埋点序列 [TURN_START, PROVIDER_REQUEST, STREAM_END, TRANSITION(completed)]。
+
+Task 2 起 query_loop 签名加 agent_state;AgentState(messages=...) 与 QueryState
+共享同一 list(原地 extend 即累积)。QueryParams 去 messages。
 """
 import asyncio
 
@@ -14,6 +17,7 @@ from core.provider_errors import TransientProviderError
 from core.providers.anthropic import AnthropicAdapter
 from core.tools import Tool
 from core.types import (
+    AgentState,
     AssistantMessage,
     StreamEvent,
     TerminalReason,
@@ -62,7 +66,6 @@ class SpyTracer(NoopTracer):
 def _params(spy_tracer=None) -> QueryParams:
     adapter = AnthropicAdapter(api_key="k", base_url=BASE)
     return QueryParams(
-        messages=[UserMessage(content="你好")],
         system="be brief",
         model="claude-sonnet-4-6",
         max_tokens=128,
@@ -71,11 +74,16 @@ def _params(spy_tracer=None) -> QueryParams:
     )
 
 
+def _agent_state() -> AgentState:
+    """构造与原 _params 共用 messages=[UserMessage("你好")] 的 agent_state。"""
+    return AgentState(messages=[UserMessage(content="你好")])
+
+
 @respx.mock
 async def test_query_loop_pure_text_completes():
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params(), spy)]
+    out = [m async for m in query_loop(_agent_state(), _params(), spy)]
 
     assts = [m for m in out if isinstance(m, AssistantMessage)]
     assert len(assts) == 1
@@ -87,7 +95,7 @@ async def test_query_loop_pure_text_completes():
 async def test_query_loop_trace_sequence_completes():
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
     spy = SpyTracer()
-    async for _ in query_loop(_params(), spy):
+    async for _ in query_loop(_agent_state(), _params(), spy):
         pass
 
     kinds = [e.kind for e in spy.events]
@@ -108,7 +116,7 @@ async def test_query_loop_pure_text_no_tool_execution():
     """
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params(), spy)]
+    out = [m async for m in query_loop(_agent_state(), _params(), spy)]
     # 无 tool_use → 不进入 get_results 分支,直接 completed
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     assert transitions[-1].payload["reason"] == "completed"
@@ -152,10 +160,14 @@ def _text_events_async(text="ok", stop="end_turn"):
 
 def _params_with(provider, spy_tracer=None) -> QueryParams:
     return QueryParams(
-        messages=[UserMessage(content="hi")],
         system="", model="m", max_tokens=16,
         provider=provider, abort_signal=asyncio.Event(),
     )
+
+
+def _agent_state_hi() -> AgentState:
+    """Task 2:query_loop 入参 agent_state,messages=[UserMessage("hi")]。"""
+    return AgentState(messages=[UserMessage(content="hi")])
 
 
 async def _no_sleep(_s):
@@ -167,7 +179,7 @@ async def test_network_retry_then_success(monkeypatch):
     monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
     provider = _ScriptedProvider([TransientProviderError("conn"), _text_events_async("ok")])
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params_with(provider), spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
     assts = [m for m in out if isinstance(m, AssistantMessage)]
     assert len(assts) == 1 and assts[0].content[0].text == "ok"  # pyright: ignore[reportAttributeAccessIssue]
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
@@ -179,7 +191,7 @@ async def test_network_retry_exhausted_terminal(monkeypatch):
     monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
     provider = _ScriptedProvider([TransientProviderError("x")] * 4)
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params_with(provider), spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     assert transitions[-1].payload["reason"] == "model_error"
     assert provider.calls == 4  # 初试 + 3 次重试
@@ -192,7 +204,7 @@ async def test_max_tokens_escalate_then_success(monkeypatch):
         _text_events_async("完整", stop="end_turn"),
     ])
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params_with(provider), spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
     assts = [m for m in out if isinstance(m, AssistantMessage)]
     # 最终轮输出完整(升档重发后)
     assert assts[-1].content[0].text == "完整"  # pyright: ignore[reportAttributeAccessIssue]
@@ -236,7 +248,7 @@ async def test_max_tokens_with_tool_use_does_not_execute(monkeypatch):
     params = _params_with(provider)
     params.tools = [tool]
     spy = SpyTracer()
-    out = [m async for m in query_loop(params, spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), params, spy)]
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     # 升档(非 next_turn): 证明 withheld 优先于 needs_follow_up
     assert transitions[0].payload["reason"] == "max_output_tokens_escalate"
@@ -255,7 +267,7 @@ async def test_prompt_too_long_terminal(monkeypatch):
     monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
     provider = _ScriptedProvider([PromptTooLongError("too long", status=400)])
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params_with(provider), spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     assert transitions[-1].payload["reason"] == "prompt_too_long"
 
@@ -271,7 +283,7 @@ async def test_programming_bug_not_swallowed(monkeypatch):
             return 0
 
     with pytest.raises(KeyError):
-        async for _ in query_loop(_params_with(_BugProvider()), SpyTracer()):
+        async for _ in query_loop(_agent_state_hi(), _params_with(_BugProvider()), SpyTracer()):
             pass
 
 
@@ -335,7 +347,7 @@ async def test_withheld_path_discards_executor_tool_task(monkeypatch):
     params.tool_execution_mode = "streaming"  # 关键: add_tool 即 create_task(fire-and-forget)
     spy = SpyTracer()
 
-    out = [m async for m in query_loop(params, spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), params, spy)]
 
     # 升档 + 最终 completed: 走了 withheld 路径
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
@@ -372,7 +384,7 @@ async def test_network_retry_yields_tombstone(monkeypatch):
     monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
     provider = _ScriptedProvider([TransientProviderError("conn"), _text_events_async("ok")])
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params_with(provider), spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
     tombstones = [m for m in out if isinstance(m, Tombstone)]
     assert len(tombstones) == 1 and tombstones[0].turn_id == 1   # 失败轮 turn_id=1
     assts = [m for m in out if isinstance(m, AssistantMessage)]
@@ -384,7 +396,7 @@ async def test_network_exhausted_yields_tombstone_then_return(monkeypatch):
     monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
     provider = _ScriptedProvider([TransientProviderError("x")] * 4)
     spy = SpyTracer()
-    out = [m async for m in query_loop(_params_with(provider), spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
     tombstones = [m for m in out if isinstance(m, Tombstone)]
     assert len(tombstones) == 4   # 每个失败轮(turn_id 1-4: 初始 + 3 次重试)各一个 tombstone
     # 无整轮(全失败)
@@ -398,9 +410,74 @@ async def test_abort_yields_tombstone(monkeypatch):
     params = _params_with(provider)
     params.abort_signal.set()   # 预置 abort
     spy = SpyTracer()
-    out = [m async for m in query_loop(params, spy)]
+    out = [m async for m in query_loop(_agent_state_hi(), params, spy)]
     # abort 在首个 StreamEvent 后触发 → tombstone
     assert any(isinstance(m, Tombstone) for m in out)
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     assert transitions[-1].payload["reason"] == "user_interrupt"
+
+
+# --- Task 2 review Fix 2: withheld → recovery 第二档 端到端(不重复入 messages) ---
+
+
+async def test_withheld_to_recovery_no_duplicate_assistant(monkeypatch):
+    """end-to-end: max_tokens 触发 withheld → escalate(第一档) → 仍 max_tokens →
+    recovery(第二档) → 第三轮正常 end_turn。
+
+    验证 orchestrator 层不把同一条残缺 assistant 入两次:
+    - withheld 路径不 extend(escalate/recovery 都靠 rule 单次 append);
+    - 第二档 MaxOutputTokensRule.apply 单次 append turn_assistant(不与共有路径 extend 叠加)。
+
+    反向:若 orchestrator withheld 路径仍 extend(旧 bug),则第二档 rule 再 append 一次,
+    agent_state.messages 中"半句"assistant 会出现 2 次 → 测试失败。
+    """
+    monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
+
+    # 三档脚本:半句(max_tokens,escalate) → 半句(max_tokens,recovery 注入 meta) → 完整(end_turn)
+    # 注意:第二档后 messages 多了 [半句, meta],但 provider 不看历史,纯按脚本顺序产
+    provider = _ScriptedProvider([
+        _text_events_async("半句A", stop="max_tokens"),  # 第 1 轮: 触发 escalate
+        _text_events_async("半句B", stop="max_tokens"),  # 第 2 轮: 触发 recovery 第二档
+        _text_events_async("完整", stop="end_turn"),     # 第 3 轮: completed
+    ])
+    spy = SpyTracer()
+    agent_state = _agent_state_hi()
+    out = [m async for m in query_loop(agent_state, _params_with(provider), spy)]
+
+    # 三轮 provider stream 都被消费
+    assert provider.calls == 3
+
+    # 流转序列: escalate → recovery → completed
+    transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
+    reasons = [t.payload["reason"] for t in transitions]
+    assert reasons[0] == "max_output_tokens_escalate"
+    assert reasons[1] == "max_output_tokens_recovery"
+    assert reasons[-1] == "completed"
+
+    # 核心: agent_state.messages 中残缺 assistant 不重复
+    # (escalate 第一档丢弃; recovery 第二档 rule 内 append 一次)
+    def _first_text(m: AssistantMessage) -> str:
+        return m.content[0].text  # pyright: ignore[reportAttributeAccessIssue]
+
+    half_assistants = [
+        m for m in agent_state.messages
+        if isinstance(m, AssistantMessage)
+        and m.content
+        and _first_text(m) in ("半句A", "半句B")
+    ]
+    assert len(half_assistants) == 1, (
+        f"残缺 assistant 应只入 messages 一次(recovery 第二档单次 append),"
+        f"实际 {len(half_assistants)} 条: {[_first_text(a) for a in half_assistants]}"
+    )
+
+    # 最终轮完整 assistant 在 messages 中(completed 路径 extend)
+    complete = [
+        m for m in agent_state.messages
+        if isinstance(m, AssistantMessage) and _first_text(m) == "完整"
+    ]
+    assert len(complete) == 1
+
+    # submit 收到 3 条 AssistantMessage yield(整轮透传:UI 可见所有片段)
+    yielded = [m for m in out if isinstance(m, AssistantMessage)]
+    assert len(yielded) == 3
 

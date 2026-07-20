@@ -1,4 +1,4 @@
-from core.builtin_tools.readstate import FileReadState
+from core.types import FileReadState
 
 
 def test_set_get_roundtrip():

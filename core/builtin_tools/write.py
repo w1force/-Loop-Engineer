@@ -1,5 +1,8 @@
 # core/builtin_tools/write.py
-"""Write 工具: 创建/覆盖文件(写, 独占)。含陈旧检测 + unified diff 返回。"""
+"""Write 工具: 创建/覆盖文件(写, 独占)。含陈旧检测 + unified diff 返回。
+
+Task 3 起 工厂无参: func 从 ctx.agent_state.file_read_state 取(原闭包退场)。
+"""
 from __future__ import annotations
 
 import difflib
@@ -8,7 +11,6 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from ..tools import Tool, ToolContext
-from .readstate import FileReadState
 
 _DESCRIPTION = (
     "Write a file to the local filesystem. Overwrites existing files. "
@@ -22,8 +24,9 @@ class WriteIn(BaseModel):
     content: str
 
 
-def write_tool(read_state: FileReadState, cwd: str | None = None) -> Tool:
+def write_tool() -> Tool:
     async def _write(inp: WriteIn, ctx: ToolContext) -> str:
+        read_state = ctx.agent_state.file_read_state   # ★ 从 ctx 取(原闭包)
         path = Path(inp.file_path)
         exists = path.exists()
 

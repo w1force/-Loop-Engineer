@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from core.tools import Tool, ToolContext, default_can_use_tool
 from core.tool_executor.base import TrackedTool
 from core.tool_executor.streaming import StreamingToolExecutor
-from core.types import ToolResultBlock, ToolUseBlock
+from core.types import AgentState, ToolResultBlock, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -16,7 +16,7 @@ class _In(BaseModel):
 
 
 def _ctx():
-    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
 
 
 def _tracked(tid: str, name: str) -> TrackedTool:

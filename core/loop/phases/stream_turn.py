@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from ...types import (
     AssistantMessage,
-    State,
+    QueryState,
     StreamEvent,
     TextBlock,
     ToolUseBlock,
@@ -120,7 +120,8 @@ class StreamOutcome(BaseModel):
 
 
 async def stream_turn(
-    state: State,
+    agent_state,          # ★ Task 2 新增(本期内部不用,预留;messages 仍走 state.messages)
+    state: QueryState,
     params: "QueryParams",
     tracer: Tracer,
     executor: "ToolExecutor | None",
@@ -133,6 +134,9 @@ async def stream_turn(
     needs_follow_up 只看有没有 ToolUseBlock,不看 stop_reason(红线#2)。
     withheld = "max_output_tokens" iff stop_reason == "max_tokens"(权威信号来自
     message_delta, 必到; prompt_too_long 走异常路径不产生 withheld)。
+
+    Task 2: agent_state 入参为后续 phase 工具接线预留(本期内部仍用 state.messages,
+    因 QueryState(messages=agent_state.messages) 引用同一 list)。
     """
     max_tokens = state.max_output_tokens_override or params.max_tokens
     events = params.provider.stream(

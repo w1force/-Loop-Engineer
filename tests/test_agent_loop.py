@@ -1,4 +1,7 @@
-"""agent_loop: is_result_successful 三路径 + submit 端到端 success + 持久化。"""
+"""agent_loop: is_result_successful 三路径 + submit 端到端 success + 持久化。
+
+Task 2: submit 签名加 agent_state(messages 走 agent_state.messages 跨 submit 累积)。
+"""
 import asyncio
 import json
 
@@ -8,6 +11,7 @@ import respx
 from core.agent_loop import AgentConfig, is_result_successful, submit
 from core.providers.anthropic import AnthropicAdapter
 from core.types import (
+    AgentState,
     AssistantMessage,
     TextBlock,
     ToolResultBlock,
@@ -72,7 +76,7 @@ async def test_submit_success_writes_transcript(tmp_path):
         max_tokens=128,
         transcript_path=str(path),
     )
-    results = [r async for r in submit("你好", cfg, NoopTracer())]
+    results = [r async for r in submit("你好", AgentState(), cfg, NoopTracer())]
 
     assert results[-1]["type"] == "result"
     assert results[-1]["subtype"] == "success"
@@ -103,7 +107,7 @@ async def test_submit_handles_tombstone_and_stream_event(monkeypatch, tmp_path):
     from core.types import Tombstone, StreamEvent
 
     # mock query_loop 产出: StreamEvent + Tombstone + AssistantMessage
-    async def _fake_query_loop(params, tracer):
+    async def _fake_query_loop(agent_state, params, tracer):
         yield StreamEvent(type="message_start")
         yield Tombstone(turn_id=1)              # 模拟第一轮失败
         yield _assistant_msg("ok")              # 模拟重试轮整轮
@@ -118,7 +122,44 @@ async def test_submit_handles_tombstone_and_stream_event(monkeypatch, tmp_path):
         max_tokens=16,
         transcript_path=str(tmp_path / "t.jsonl"),
     )
-    results = [r async for r in submit("hi", config, NoopTracer())]
+    results = [r async for r in submit("hi", AgentState(), config, NoopTracer())]
     # submit 不因 Tombstone/StreamEvent 崩, 最终 success
     assert any(r.get("type") == "result" for r in results)
     assert results[-1]["subtype"] == "success"
+
+
+async def test_submit_accumulates_across_submits(monkeypatch, tmp_path):
+    """同一 agent_state 跨两次 submit:messages 累积 + budget 累积。"""
+    import core.agent_loop as al
+    from core.agent_loop import AgentConfig, build_agent_state, submit
+    from core.types import AssistantMessage, TextBlock, Usage
+    from telemetry.tracer import NoopTracer
+
+    async def _fake_query_loop(agent_state, params, tracer):
+        # 直接 yield 一条 AssistantMessage(带 usage),不依赖 provider/aggregate_stream 协议。
+        # query_loop 真实契约(orchestrator.py:152):state.messages.extend(outcome.assistant_msgs)
+        # 因 QueryState.messages 与 agent_state.messages 引用同一 list,故 mock 必须 extend
+        # agent_state.messages —— 这是 submit 跨 submit 累积的物理机制,不能省。
+        msg = AssistantMessage(
+            content=[TextBlock(text="reply")],
+            usage=Usage(input_tokens=10, output_tokens=5),
+            stop_reason="end_turn",
+        )
+        agent_state.messages.append(msg)
+        yield msg
+    monkeypatch.setattr(al, "query_loop", _fake_query_loop)
+
+    cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m",
+                      max_tokens=100, transcript_path=str(tmp_path / "t.jsonl"))
+    astate = build_agent_state(cfg)
+    tracer = NoopTracer()
+
+    r1 = [r async for r in submit("hi1", astate, cfg, tracer)]
+    r2 = [r async for r in submit("hi2", astate, cfg, tracer)]
+
+    # messages 累积:user1 + assistant1 + user2 + assistant2 = 4
+    assert len(astate.messages) == 4
+    # budget 累积(两次 submit 各 10 input + 5 output)
+    assert astate.total_input_tokens == 20
+    assert astate.total_output_tokens == 10
+    assert r1[-1]["subtype"] == "success" and r2[-1]["subtype"] == "success"

@@ -1,5 +1,8 @@
 # core/builtin_tools/read.py
-"""Read 工具: 读文本文件(按行 + 行号, 只读, 并发安全)。支持去重 + 陈旧记录。"""
+"""Read 工具: 读文本文件(按行 + 行号, 只读, 并发安全)。支持去重 + 陈旧记录。
+
+Task 3 起 工厂无参: func 从 ctx.agent_state.file_read_state 取(原闭包退场)。
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +10,6 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from ..tools import Tool, ToolContext
-from .readstate import FileReadState
 
 MAX_READ_BYTES = 256_000
 
@@ -52,8 +54,9 @@ def _add_line_numbers(lines: list[str], start: int, total: int) -> str:
     return "\n".join(out)
 
 
-def read_tool(read_state: FileReadState, cwd: str | None = None) -> Tool:
+def read_tool() -> Tool:
     async def _read(inp: ReadIn, ctx: ToolContext) -> str:
+        read_state = ctx.agent_state.file_read_state   # ★ 从 ctx 取(原闭包)
         path = Path(inp.file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {inp.file_path}")

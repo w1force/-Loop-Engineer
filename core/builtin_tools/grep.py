@@ -1,5 +1,8 @@
 # core/builtin_tools/grep.py
-"""Grep 工具: 内容搜索(ripgrep, 只读, 并发安全)。"""
+"""Grep 工具: 内容搜索(ripgrep, 只读, 并发安全)。
+
+Task 3 起 工厂无参: func 从 ctx.agent_state.cwd 取(原闭包退场)。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -92,8 +95,9 @@ def _format_limit(truncated: bool, offset: int) -> str:
     return f" [{', '.join(parts)}]" if parts else ""
 
 
-def grep_tool(cwd: str | None = None) -> Tool:
+def grep_tool() -> Tool:
     async def _grep(inp: GrepIn, ctx: ToolContext) -> str:
+        cwd = ctx.agent_state.cwd   # ★ 从 ctx 取(原闭包)
         base = Path(inp.path) if inp.path else Path(cwd or os.getcwd())
         args = _build_args(inp)
         try:

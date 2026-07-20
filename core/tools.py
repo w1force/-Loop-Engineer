@@ -19,7 +19,7 @@ from telemetry.tracer import Tracer
 from .types import TextBlock, ToolUseBlock
 
 if TYPE_CHECKING:
-    from .types import State
+    from .types import AgentState, QueryState
 
 
 def _not_impl(feature: str, phase: str) -> Never:
@@ -29,11 +29,17 @@ def _not_impl(feature: str, phase: str) -> Never:
 
 @dataclass
 class ToolContext:
-    """工具执行时注入的运行时上下文(LLM 参数之外)。各 tool 按需读取。"""
+    """工具执行时注入的运行时上下文。
+
+    双 state:
+    - agent_state: 跨 submit 的 agent 会话状态(工具取 file_read_state/skills/cwd)
+    - query_state: 单次 query_loop 内的循环状态(原 state 改名)
+    """
 
     tracer: Tracer
     abort_signal: asyncio.Event
-    state: "State | None" = None  # 预留:当前 agent 状态
+    agent_state: "AgentState"               # 必需:跨 submit(工具取 file_read_state/skills/cwd)
+    query_state: "QueryState | None" = None  # 单轮(原 state 改名)
 
 
 class CanUseDecision(BaseModel):

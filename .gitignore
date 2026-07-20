@@ -21,3 +21,4 @@ main-lwt.py
 
 # 临时文件夹
 tmp-dir/
+.serena/

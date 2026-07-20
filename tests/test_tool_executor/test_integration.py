@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from core.loop.orchestrator import QueryParams, query_loop
 from core.providers.anthropic import AnthropicAdapter
 from core.tools import Tool
-from core.types import AssistantMessage, TextBlock, UserMessage
+from core.types import AgentState, AssistantMessage, TextBlock, UserMessage
 from telemetry.tracer import NoopTracer
 
 BASE = "https://api.anthropic.com"
@@ -81,7 +81,6 @@ async def test_tool_use_roundtrip_executes_and_reinjects():
 
     adapter = AnthropicAdapter(api_key="k", base_url=BASE)
     params = QueryParams(
-        messages=[UserMessage(content="巴黎天气")],
         system="",
         model="claude-sonnet-4-6",
         max_tokens=64,
@@ -91,7 +90,8 @@ async def test_tool_use_roundtrip_executes_and_reinjects():
         tool_execution_mode="streaming",
     )
 
-    out = [m async for m in query_loop(params, NoopTracer())]
+    agent_state = AgentState(messages=[UserMessage(content="巴黎天气")])
+    out = [m async for m in query_loop(agent_state, params, NoopTracer())]
     assts = [m for m in out if isinstance(m, AssistantMessage)]
     # 第二轮 assistant 文本应出现(说明 tool_result 被回灌后模型正常收尾)。
     # 用 isinstance(TextBlock) 做类型守卫,pyright 才能收敛到 .text 属性。

@@ -12,7 +12,7 @@ import logging
 from pydantic import BaseModel
 
 from config import get_settings
-from core.agent_loop import AgentConfig, submit
+from core.agent_loop import AgentConfig, build_agent_state, submit
 from core.providers.anthropic import AnthropicAdapter
 from core.tools import Tool
 from telemetry.tracer import LoggingTracer
@@ -63,7 +63,8 @@ async def demo_real_llm():
         transcript_path="run.transcript.jsonl",
     )
     user_input = "帮我读 a、b、c 三个 key,然后把结果汇总写到 x"
-    async for result in submit(user_input, config, tracer):
+    astate = build_agent_state(config)
+    async for result in submit(user_input, astate, config, tracer):
         print(result)
 
 
@@ -82,7 +83,8 @@ async def real_tool_demo():
         transcript_path="run.transcript.jsonl",
     )
     user_input = "output.json中的json格式不正确请帮我修复"
-    async for result in submit(user_input, config, tracer):
+    astate = build_agent_state(config)
+    async for result in submit(user_input, astate, config, tracer):
         print(result)
 
 

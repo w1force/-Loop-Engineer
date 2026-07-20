@@ -1,12 +1,51 @@
 """核心数据模型 (P1 §4 改进版)。
 
-全部 pydantic v2 —— 后续工具入参 schema 要用 `.model_json_schema()`。
+QueryState/Message 等仍是 pydantic v2(后续工具入参 schema 用 `.model_json_schema()`)。
+AgentState/SkillMeta/Tombstone 是 dataclass(内部状态容器/纯数据,不需校验/序列化)。
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
+
+
+# ── 文件读状态 ────────────────────────────────────────
+# (从 core/builtin_tools/readstate.py 移入:types 反向依赖 builtin_tools 会触发
+#  types → builtin_tools/__init__ → tools → types 循环 import;和 SkillMeta 一样自含。)
+@dataclass
+class ReadRecord:
+    content: str
+    mtime: float
+    offset: int
+    limit: int | None
+
+
+class FileReadState:
+    """agent 级文件读状态: read 记录 mtime, write 查陈旧。跨轮持久(不随 ToolContext 重建)。"""
+
+    def __init__(self) -> None:
+        self._records: dict[str, ReadRecord] = {}
+
+    def set(self, path: str, content: str, mtime: float,
+            offset: int, limit: int | None) -> None:
+        self._records[path] = ReadRecord(content, mtime, offset, limit)
+
+    def get(self, path: str) -> ReadRecord | None:
+        return self._records.get(path)
+
+    def is_unchanged(self, path: str, offset: int,
+                     limit: int | None, disk_mtime: float) -> bool:
+        """read 去重: 同 (path, offset, limit) 且 mtime 未变 → True。"""
+        rec = self._records.get(path)
+        return (rec is not None and rec.offset == offset
+                and rec.limit == limit and rec.mtime == disk_mtime)
+
+    def is_stale(self, path: str, disk_mtime: float) -> bool:
+        """write 陈旧: 读过且读后被外部改了(disk mtime > 记录) → True。没读过 → False。"""
+        rec = self._records.get(path)
+        return rec is not None and disk_mtime > rec.mtime
 
 
 # ── 消息块 ──────────────────────────────────────────
@@ -115,7 +154,25 @@ class Terminal(BaseModel):
     error: str | None = None
 
 
-class State(BaseModel):
+@dataclass(frozen=True)
+class SkillMeta:
+    """一个 skill 的元数据(从 core/skills/loader.py 移入,避免 types→skills 循环依赖)。"""
+    name: str            # = 目录名,skill 标识(load_skill 入参)
+    description: str     # frontmatter.description,进 system 目录段
+    skill_dir: Path      # skill 目录绝对路径
+    skill_md: Path       # SKILL.md 绝对路径(= skill_dir / "SKILL.md")
+
+
+class QueryState(BaseModel):
+    """单次 query_loop 内的循环状态(原 State 改名)。
+
+    字段不变:messages/turn_count/recovery 计数/transition。
+    后续 Task 2 起 messages 引用 agent_state.messages(单一来源)。
+
+    注:pydantic v2.13 默认对 list 入参做 copy,会切断与 agent_state.messages 的引用。
+    故 orchestrator 用 QueryState.model_construct(messages=...) 跳过校验以保引用。
+    (ConfigDict(copy_on_model_validation="none") 在 v2 原生已移除,仅 v1 兼容层支持。)
+    """
     messages: list[Message]
     turn_count: int = 1
     max_output_tokens_recovery_count: int = 0
@@ -123,6 +180,21 @@ class State(BaseModel):
     has_attempted_autocompact: bool = False
     network_retry_count: int = 0
     transition: Continue | Terminal | None = None
+
+
+@dataclass
+class AgentState:
+    """跨 submit 的 agent 会话状态(caller 持有)。
+
+    收编原本散落/闭包的数据:messages(跨 submit 累积)、skills、file_read_state、cwd、预算计数。
+    tools 不存(走 QueryParams;executor 注册 + stream_turn 发 API)。
+    """
+    messages: list[Message] = field(default_factory=list)
+    skills: list[SkillMeta] = field(default_factory=list)
+    file_read_state: FileReadState = field(default_factory=FileReadState)
+    cwd: str = ""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
 
 # ── 常量(对齐真实项目 query.ts) ──

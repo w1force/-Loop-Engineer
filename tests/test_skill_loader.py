@@ -1,7 +1,8 @@
 """Task 1: SkillLoader.scan + frontmatter 解析测试。"""
 from pathlib import Path
 
-from core.skills import SkillLoader, SkillMeta
+from core.skills import SkillLoader
+from core.types import SkillMeta
 
 
 def _make_skill(root: Path, name: str, body: str) -> Path:
@@ -81,39 +82,6 @@ def test_scan_multiline_description(tmp_path):
     assert "line one" in desc and "line two" in desc
 
 
-# --- Task 2: render_catalog + append_catalog ---
-
-from core.skills import render_catalog, append_catalog  # noqa: E402
-
-
-def test_render_catalog_format(tmp_path):
-    skills = tmp_path / "skills"
-    _make_skill(skills, "foo", "---\ndescription: foo skill\n---\n")
-    out = render_catalog(SkillLoader.scan([skills]))
-    assert "<skills>" in out and "</skills>" in out
-    assert "name: foo" in out
-    assert "foo skill" in out
-    assert "load_skill(name)" in out
-
-
-def test_render_catalog_empty():
-    assert render_catalog([]) == ""
-
-
-def test_render_catalog_multiline_description(tmp_path):
-    skills = tmp_path / "skills"
-    _make_skill(skills, "foo", "---\ndescription: |\n  line one\n  line two\n---\n")
-    out = render_catalog(SkillLoader.scan([skills]))
-    assert "line one" in out and "line two" in out
-
-
-def test_append_catalog_str():
-    assert append_catalog("abc", "X") == "abcX"
-
-
-def test_append_catalog_list():
-    base = [{"type": "text", "text": "a"}]
-    out = append_catalog(base, "X")
-    assert isinstance(out, list)
-    assert out[0] == {"type": "text", "text": "a"}
-    assert out[1] == {"type": "text", "text": "X"}
+# --- render_catalog / append_catalog 已在 agent_state Task 1 删除(逻辑移到 Task 4
+# --- 的 build_system_prompt),相关测试一并下线。prepare_skills 注入行为由
+# --- tests/test_agent_loop_skill.py 覆盖(临时内联私有 helper 维持现有行为)。

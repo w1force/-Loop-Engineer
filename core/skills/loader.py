@@ -2,25 +2,21 @@
 
 扫描 skill_dirs 的直接子目录,解析每个 SKILL.md 的 YAML frontmatter,产出 SkillMeta。
 frontmatter 宽松:容忍未知字段,YAML 损坏/缺 description → 跳过该 skill(不中断整体扫描)。
+
+SkillMeta 已移到 core/types.py(避免底层 types 反向依赖上层 skills;本模块单向 import)。
+render_catalog/append_catalog 已删除(逻辑移到 Task 4 的 build_system_prompt)。
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
 
+from ..types import SkillMeta
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class SkillMeta:
-    """一个 skill 的元数据。"""
-    name: str            # = 目录名,skill 标识(load_skill 入参)
-    description: str     # frontmatter.description,进 system 目录段
-    skill_dir: Path      # skill 目录绝对路径
-    skill_md: Path       # SKILL.md 绝对路径(= skill_dir / "SKILL.md")
 
 
 def _parse_frontmatter(skill_md: Path) -> dict:
@@ -47,7 +43,7 @@ def _parse_frontmatter(skill_md: Path) -> dict:
 
 class SkillLoader:
     @staticmethod
-    def scan(skill_dirs: list[str | Path]) -> list[SkillMeta]:
+    def scan(skill_dirs: Sequence[str | Path]) -> list[SkillMeta]:
         """扫描所有 skill_dirs 的直接子目录,解析 SKILL.md frontmatter。
         返回按 name 排序的 list[SkillMeta]。容错:单 skill 失败不影响其他。"""
         metas: dict[str, SkillMeta] = {}  # name -> meta(同 name 后者覆盖)
@@ -76,25 +72,3 @@ class SkillLoader:
                     skill_md=skill_md,
                 )
         return sorted(metas.values(), key=lambda m: m.name)
-
-
-def render_catalog(metas: list[SkillMeta]) -> str:
-    """metas → <skills>...</skills> 目录段 + 调用指引。空 metas 返回 ''。"""
-    if not metas:
-        return ""
-    lines = ["", "", "<skills>"]
-    for m in metas:
-        desc = " ".join(m.description.split())  # 压缩多行空白成单行
-        lines.append(f"- name: {m.name}")
-        lines.append(f"  description: {desc}")
-    lines.append("</skills>")
-    lines.append("")
-    lines.append("当用户请求匹配某个 skill 时,调用 load_skill(name) 加载完整指令后再执行。")
-    return "\n".join(lines)
-
-
-def append_catalog(system: str | list[dict], catalog: str) -> str | list[dict]:
-    """把 catalog 拼到 system 末尾,兼容 str 与 list[dict] 两种形态。"""
-    if isinstance(system, str):
-        return system + catalog
-    return [*system, {"type": "text", "text": catalog}]
