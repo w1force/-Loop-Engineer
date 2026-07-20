@@ -61,12 +61,15 @@ async def query_loop(
 ) -> AsyncIterator[Message | StreamEvent]:
     """内层 agentic loop。业务异常在 while 内 catch → chain.handle_error → State 变换。"""
     state = State(messages=params.messages, turn_count=1)
+    #回扣机制
     chain = build_recovery_chain()
 
     while True:
         tracer.emit(TraceEvent(kind=TraceKind.TURN_START, turn=state.turn_count))
         state = await maybe_compact(state, params, tracer)
 
+        # phase 2: 流式调 LLM + 聚合(边聚合边打点)
+        # ctx：工具执行时框架提供的运行时上下文
         ctx = ToolContext(tracer=tracer, abort_signal=params.abort_signal, state=state)
         executor = make_executor(
             params.tool_execution_mode, params.tools, params.can_use_tool, tracer, ctx

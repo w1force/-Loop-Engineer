@@ -66,3 +66,27 @@ class Tool(BaseModel):
             "description": self.description,
             "input_schema": self.input_model.model_json_schema(),
         }
+
+
+def build_tool(
+    *,
+    name: str,
+    description: str,
+    input_model: type[BaseModel],
+    func: Callable[..., Awaitable[str | dict]],
+    is_concurrency_safe: bool = False,
+    pre_execute: Callable[..., Awaitable[None]] | None = None,
+) -> Tool:
+    """构造 Tool
+
+    所有内置工具都应经此构造,默认值(fail-closed)集中在这里——
+    ``is_concurrency_safe`` 默认 False(当作写工具、独占),只读工具显式置 True。
+    """
+    return Tool(
+        name=name,
+        description=description,
+        input_model=input_model,
+        func=func,
+        is_concurrency_safe=is_concurrency_safe,
+        pre_execute=pre_execute,
+    )
