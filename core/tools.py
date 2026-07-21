@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from typing_extensions import Never
@@ -39,7 +39,7 @@ class ToolContext:
     tracer: Tracer
     abort_signal: asyncio.Event
     agent_state: "AgentState"               # 必需:跨 submit(工具取 file_read_state/skills/cwd)
-    query_state: "QueryState | None" = None  # 单轮(原 state 改名)
+    query_state: "QueryState"  # 单轮(原 state 改名)
 
 
 class CanUseDecision(BaseModel):

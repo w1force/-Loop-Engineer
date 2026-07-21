@@ -14,6 +14,7 @@ from typing import Callable, Literal, cast
 from ..provider import Provider
 from ..provider_errors import ProviderError
 from ..tool_executor import make_executor
+from ..file_state import FileStateCache
 from ..tools import Tool, ToolContext, default_can_use_tool
 from ..types import (
     AgentState,
@@ -74,7 +75,7 @@ async def query_loop(
     pydantic.v1 兼容层、v2 原生已移除,revalidate_instances 不控制初始 copy),
     原地 extend/append 即累积到 agent_state.messages(跨 submit 持久)。
     """
-    state = QueryState.model_construct(messages=agent_state.messages, turn_count=1)  # ★ 引用同一 list
+    state = QueryState.model_construct(messages=agent_state.messages, turn_count=1, read_file_state=FileStateCache())  # ★ 引用同一 list
     chain = build_recovery_chain()
     turn_id = 0
 
@@ -179,7 +180,10 @@ async def query_loop(
                 }
             )
             if state.turn_count > params.max_turns:
+                # 对齐 CC:max_turns 是"异常终止",yield 显式信号让外层出 error_max_turns
+                # (绕过 is_result_successful);正常完成则不发信号。
                 _emit_transition(tracer, Terminal(reason=TerminalReason.MAX_TURNS))
+                yield Terminal(reason=TerminalReason.MAX_TURNS)
                 return
             _emit_transition(tracer, state.transition)
             continue
@@ -187,6 +191,10 @@ async def query_loop(
         decision = await chain.handle(state, outcome, params, tracer)
         _emit_transition(tracer, decision.transition)
         if isinstance(decision.transition, Terminal):
+            # 对齐 CC:正常完成(COMPLETED)不发信号 → 交外层 is_result_successful 判定;
+            # 异常终止(model_error / prompt_too_long 等)才 yield,让外层出专属错误 subtype。
+            if decision.transition.reason is not TerminalReason.COMPLETED:
+                yield decision.transition
             return
         if decision.next_state is None:
             return
