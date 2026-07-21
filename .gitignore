@@ -24,3 +24,7 @@ main-lwt.py
 tmp-dir/
 *.log
 .serena/
+
+# IDE / 编辑器
+.idea/
+.vscode/
