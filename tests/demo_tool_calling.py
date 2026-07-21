@@ -4,10 +4,14 @@
 展示本项目中工具调用(Tool Calling)框架的完整工作流程:
 
   1. 用 build_tool() 定义自定义工具(计算器、点赞)
-  2. 用 ToolContext 注入运行时上下文
+  2. 用 ToolContext 注入运行时上下文(含 agent_state/query_state)
   3. 用 BatchToolExecutor 批量执行(含并发/串行分区)
   4. 用 StreamingToolExecutor 流式执行(机会主义调度)
   5. 模拟 LLM 发出 ToolUseBlock → 执行 → 取回 ToolResultBlock
+  6. 错误处理路径展示(未知工具/校验失败/函数异常)
+  7. make_executor 工厂函数演示
+  8. Tool Schema 生成演示
+  9. builtin_tools 集成演示(Read/Glob/Grep 等)
 
 运行方式:
     python -m tests.demo_tool_calling
@@ -15,17 +19,19 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 from pydantic import BaseModel, Field
 
+from core.file_state import FileStateCache
 from core.tools import ToolContext, build_tool, default_can_use_tool
 from core.tool_executor import (
     BatchToolExecutor,
     StreamingToolExecutor,
     make_executor,
 )
-from core.types import ToolUseBlock
+from core.types import AgentState, QueryState, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -50,10 +56,10 @@ class LikeInput(BaseModel):
     post_id: str = Field(description="要点赞的文章 ID")
 
 
-async def like_func(inp: LikeInput, ctx: ToolContext) -> dict:
+async def like_func(inp: LikeInput, ctx: ToolContext) -> str:
     """模拟点赞(写操作,模拟 0.2s 延迟)"""
     await asyncio.sleep(0.2)  # 模拟真实 IO
-    return {"status": "ok", "post_id": inp.post_id, "liked": True}
+    return f"点赞成功: post_id={inp.post_id}"
 
 
 # ── Echo: 回声工具(只读,并发安全) ──
@@ -98,13 +104,41 @@ LIKE_TOOL = build_tool(
 
 
 # ════════════════════════════════════════════════════════════════════
+#  辅助: 构造 ToolContext(注入 agent_state + query_state)
+# ════════════════════════════════════════════════════════════════════
+
+def make_demo_ctx() -> ToolContext:
+    """构造 Demo 用的 ToolContext。
+    
+    注意: ToolContext 现在需要 agent_state(跨 submit 持久)和
+    query_state(单次 loop 状态,含 read_file_state LRU 缓存)。
+    """
+    agent_state = AgentState()
+    query_state = QueryState(
+        messages=[],
+        read_file_state=FileStateCache(),
+    )
+    return ToolContext(
+        tracer=NoopTracer(),
+        abort_signal=asyncio.Event(),
+        agent_state=agent_state,
+        query_state=query_state,
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
 #  辅助: 构造 ToolUseBlock(模拟 LLM 发出的工具调用请求)
 # ════════════════════════════════════════════════════════════════════
 
+_COUNTER = 0
+
+
 def make_tool_use(name: str, input_: dict, id_: str | None = None) -> ToolUseBlock:
     """快速构造 ToolUseBlock。id 自动编号。"""
+    global _COUNTER
+    _COUNTER += 1
     return ToolUseBlock(
-        id=id_ or f"call_{name}_{int(time.time() * 1000) % 100000}",
+        id=id_ or f"call_{name}_{_COUNTER}",
         name=name,
         input=input_,
     )
@@ -126,7 +160,7 @@ async def demo_batch_executor():
     print("📦 BatchToolExecutor 演示")
     print("=" * 60)
 
-    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    ctx = make_demo_ctx()
     executor = BatchToolExecutor(
         can_use_tool=default_can_use_tool,
         tracer=NoopTracer(),
@@ -183,7 +217,7 @@ async def demo_streaming_executor():
     print("⚡ StreamingToolExecutor 演示")
     print("=" * 60)
 
-    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    ctx = make_demo_ctx()
     executor = StreamingToolExecutor(
         can_use_tool=default_can_use_tool,
         tracer=NoopTracer(),
@@ -229,7 +263,7 @@ async def demo_error_handling():
     print("🛡️  错误处理演示")
     print("=" * 60)
 
-    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    ctx = make_demo_ctx()
     executor = BatchToolExecutor(
         can_use_tool=default_can_use_tool,
         tracer=NoopTracer(),
@@ -273,7 +307,7 @@ async def demo_factory():
     print("🏭 make_executor 工厂函数演示")
     print("=" * 60)
 
-    ctx = ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event())
+    ctx = make_demo_ctx()
     tools = [CALC_TOOL, ECHO_TOOL]
 
     # streaming 模式
@@ -314,13 +348,104 @@ async def demo_tool_schema():
 
 
 # ════════════════════════════════════════════════════════════════════
+#  第八部分: builtin_tools 对接演示
+# ════════════════════════════════════════════════════════════════════
+
+async def demo_builtin_tools():
+    """演示内置工具(Read/Glob/Grep)与 executor 的对接"""
+    print("\n" + "=" * 60)
+    print("🔧 内置工具集成演示 (Read / Glob)")
+    print("=" * 60)
+
+    from core.registry import get_tools
+    all_tools = get_tools()
+
+    print(f"\n   注册了 {len(all_tools)} 个内置工具:")
+    for t in all_tools:
+        safe_mark = "✅" if t.is_concurrency_safe else "❌"
+        print(f"     {safe_mark} {t.name}: {t.description[:50]}...")
+
+    ctx = make_demo_ctx()
+    # 用 Glob 工具查找当前项目的 .py 文件
+    glob_tool = [t for t in all_tools if t.name == "Glob"][0]
+    read_tool = [t for t in all_tools if t.name == "Read"][0]
+
+    # 演示 Glob: 在当前目录找 .py 文件
+    print("\n📋 Glob 工具演示 (匹配 tests/*.py):")
+    glob_input = glob_tool.input_model(pattern="tests/*.py", path=os.getcwd())
+    result = await glob_tool.func(glob_input, ctx)
+    lines = result.split("\n")[:8]  # 只展示前 8 行
+    for line in lines:
+        print(f"   {line}")
+    if len(result.split("\n")) > 8:
+        print(f"   ... (共 {len(result.split('\n'))} 行)")
+
+    # 演示 Read: 读本 demo 文件的前 5 行
+    print("\n📋 Read 工具演示 (读本文件前 5 行):")
+    read_input = read_tool.input_model(
+        file_path=__file__,
+        offset=1,
+        limit=5,
+    )
+    text = await read_tool.func(read_input, ctx)
+    for line in text.split("\n"):
+        print(f"   {line}")
+
+    return all_tools
+
+
+# ════════════════════════════════════════════════════════════════════
+#  第九部分: 权限钩子演示 (can_use_tool)
+# ════════════════════════════════════════════════════════════════════
+
+async def demo_permission_hook():
+    """演示 can_use_tool 权限钩子"""
+    print("\n" + "=" * 60)
+    print("🔐 权限钩子演示 (can_use_tool)")
+    print("=" * 60)
+
+    from core.tools import CanUseDecision
+
+    async def my_can_use(tc: ToolUseBlock) -> CanUseDecision:
+        """自定义权限: 禁止 calculator 工具"""
+        if tc.name == "calculator":
+            return CanUseDecision(allow=False, reason="计算器已被管理员禁用")
+        return CanUseDecision(allow=True)
+
+    ctx = make_demo_ctx()
+    executor = BatchToolExecutor(
+        can_use_tool=my_can_use,
+        tracer=NoopTracer(),
+        ctx=ctx,
+        tools=[CALC_TOOL, ECHO_TOOL],
+    )
+
+    calls = [
+        make_tool_use("calculator", {"a": 3, "b": 5}, "p1"),  # 被权限拒绝
+        make_tool_use("echo", {"message": "权限通过!"}, "p2"),  # 通过
+    ]
+
+    print("\n📋 入队:")
+    for c in calls:
+        print(f"   [{c.id}] {c.name}({c.input})")
+        executor.add_tool(c)
+
+    print("\n⚡ 执行中...")
+    results = await executor.get_results()
+
+    for r in results:
+        status = "❌" if r.is_error else "✅"
+        print(f"   {status} [{r.tool_use_id}] {r.content}")
+
+
+# ════════════════════════════════════════════════════════════════════
 #  入口
 # ════════════════════════════════════════════════════════════════════
 
 async def main():
     print("╔══════════════════════════════════════════════════════╗")
     print("║    🎯 工具调用(Tool Calling)框架完整 Demo          ║")
-    print("║    项目: Agent Loop                                ║")
+    print("║    项目: -Loop-Engineer (Agent Loop)                ║")
     print("╚══════════════════════════════════════════════════════╝")
 
     await demo_tool_schema()
@@ -328,6 +453,8 @@ async def main():
     await demo_streaming_executor()
     await demo_error_handling()
     await demo_factory()
+    await demo_builtin_tools()
+    await demo_permission_hook()
 
     print("\n" + "=" * 60)
     print("🎉 Demo 全部完成!")

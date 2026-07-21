@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from config import get_settings
 from core.agent_loop import AgentConfig, build_agent_state, submit
+from core.prompts import build_diagnose_system_prompt
 from core.providers.anthropic import AnthropicAdapter
 from core.tools import Tool
 from telemetry.tracer import LoggingTracer
@@ -74,14 +75,14 @@ async def real_tool_demo():
     tracer = LoggingTracer({"chain_id": "demo"})
     config = AgentConfig(
         provider=provider,
-        system=("你是一个有用的编程助手。"),
+        system=build_diagnose_system_prompt(),
         model=s.model,
         max_tokens=s.max_tokens,
         max_turns=s.max_turns,
         tool_execution_mode="streaming",
         transcript_path="run.transcript.jsonl",
     )
-    user_input = "output.json中的json格式不正确请帮我修复"
+    user_input = "审计一下我项目中关于工具调用的实现方式，然后在tests文件夹下面写一个demo版"
     astate = build_agent_state(config)
     async for result in submit(user_input, astate, config, tracer):
         print(result)
