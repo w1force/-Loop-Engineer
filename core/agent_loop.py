@@ -17,6 +17,7 @@ from .transcript import record_transcript
 from .types import (
     AssistantMessage,
     Message,
+    Terminal,
     TextBlock,
     ToolUseBlock,
     Usage,
@@ -90,8 +91,12 @@ async def submit(
     )
 
     last_stop_reason: str | None = None
+    terminal: Terminal | None = None  # 仅"异常终止"(max_turns/aborted/model_error)由内层 yield
     total_in = total_out = 0
     async for msg in query_loop(params, tracer):
+        if isinstance(msg, Terminal):
+            terminal = msg  # 异常终止信号,不入 messages / transcript
+            continue
         if isinstance(msg, AssistantMessage):
             messages.append(msg)
             await record_transcript(messages, config.transcript_path)
@@ -106,16 +111,33 @@ async def submit(
 
         if config.max_budget_usd is not None:
             if _rough_cost(total_in, total_out) >= config.max_budget_usd:
-                yield {"type": "result", "subtype": "error_budget", "error": "budget exceeded"}
+                yield {"type": "result", "subtype": "error_budget", "is_error": True,
+                       "error": "budget exceeded", "stop_reason": last_stop_reason}
                 return
 
-    result = _last_message(messages, ("assistant", "user"))
-    if not is_result_successful(result, last_stop_reason):
-        yield {"type": "result", "subtype": "error_during_execution"}
+    usage = {"input_tokens": total_in, "output_tokens": total_out}
+    # 异常终止:走专属错误 subtype,绕过 is_result_successful
+    # (对齐 CC 的 max_turns_reached → error_max_turns:异常终止不参与成功判定)。
+    if terminal is not None:
+        yield {
+            "type": "result",
+            "subtype": f"error_{terminal.reason.value}",
+            "is_error": True,
+            "stop_reason": last_stop_reason,
+            "usage": usage,
+            "error": terminal.error or f"terminated: {terminal.reason.value}",
+        }
+        return
+    # 正常路径:用 is_result_successful 判定(CC 核心:最后消息形态 + end_turn 兜底)。
+    result_msg = _last_message(messages, ("assistant", "user"))
+    if not is_result_successful(result_msg, last_stop_reason):
+        yield {"type": "result", "subtype": "error_during_execution", "is_error": True,
+               "stop_reason": last_stop_reason, "usage": usage}
         return
     yield {
         "type": "result",
         "subtype": "success",
-        "text": _extract_text(result),
-        "usage": {"input_tokens": total_in, "output_tokens": total_out},
+        "text": _extract_text(result_msg),
+        "stop_reason": last_stop_reason,
+        "usage": usage,
     }

@@ -6,7 +6,8 @@
 from .edit import EDIT_TOOL
 from .glob import GLOB_TOOL
 from .grep import GREP_TOOL
-from .read import READ_TOOL
 from .write import WRITE_TOOL
+from .read import READ_TOOL
+from .bash import BASH_TOOL
 
-__all__ = ["GLOB_TOOL", "GREP_TOOL", "READ_TOOL", "EDIT_TOOL", "WRITE_TOOL"]
+__all__ = ["GLOB_TOOL", "GREP_TOOL", "WRITE_TOOL", "READ_TOOL", "BASH_TOOL"]

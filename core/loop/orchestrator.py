@@ -58,8 +58,9 @@ def _emit_transition(tracer: Tracer, transition) -> None:
 
 async def query_loop(
     params: QueryParams, tracer: Tracer
-) -> AsyncIterator[Message | StreamEvent]:
-    """内层 agentic loop。yield 消息给外层;完成时 return(附 Terminal 语义)。"""
+) -> AsyncIterator[Message | StreamEvent | Terminal]:
+    """内层 agentic loop。yield 消息给外层;终止时额外 yield 一个 Terminal(带原因),
+    再 return —— 让外层 submit 据此判定成功/失败,而不是靠"最后一条消息"反推。"""
     state = State(messages=params.messages, turn_count=1)
     #回扣机制
     chain = build_recovery_chain()
@@ -89,6 +90,7 @@ async def query_loop(
         if params.abort_signal.is_set():
             executor.discard()  # 取消在途工具任务
             _emit_transition(tracer, Terminal(reason=TerminalReason.ABORTED))
+            yield Terminal(reason=TerminalReason.ABORTED)  # ★ 终止原因传给外层
             return
 
         # phase 3: 分叉。needs_follow_up → 收工具结果回灌内联;否则交给责任链
@@ -102,7 +104,10 @@ async def query_loop(
             base["transition"] = Continue(reason=ContinueReason.NEXT_TURN)
             state = State(**base)
             if state.turn_count > params.max_turns:
+                # 对齐 CC:max_turns 是"异常终止",yield 显式信号让外层出 error_max_turns
+                # (绕过 is_result_successful);正常完成则不发信号。
                 _emit_transition(tracer, Terminal(reason=TerminalReason.MAX_TURNS))
+                yield Terminal(reason=TerminalReason.MAX_TURNS)
                 return
             _emit_transition(tracer, state.transition)  # NEXT_TURN
             continue
@@ -111,9 +116,15 @@ async def query_loop(
         decision = chain.handle(state, outcome, params, tracer)
         _emit_transition(tracer, decision.transition)
         if isinstance(decision.transition, Terminal):
+            # 对齐 CC:正常完成(COMPLETED)不发信号 → 交外层 is_result_successful 判定;
+            # 异常终止(model_error / prompt_too_long 等)才 yield,让外层出专属错误 subtype。
+            if decision.transition.reason is not TerminalReason.COMPLETED:
+                yield decision.transition
             return
         # transition 是 Continue:Phase 5 责任链给出重建后的 state(Phase 1 不会到)
         if decision.next_state is None:
-            return  # 防御:Continue 不该无 next_state
+            # 防御:Continue 不该无 next_state
+            yield Terminal(reason=TerminalReason.MODEL_ERROR, error="Continue 缺 next_state")
+            return
         state = decision.next_state
         continue
