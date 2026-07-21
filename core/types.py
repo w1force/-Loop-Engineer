@@ -8,7 +8,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+from core.file_state import FileStateCache
 
 
 # ── 文件读状态 ────────────────────────────────────────
@@ -173,6 +175,10 @@ class QueryState(BaseModel):
     故 orchestrator 用 QueryState.model_construct(messages=...) 跳过校验以保引用。
     (ConfigDict(copy_on_model_validation="none") 在 v2 原生已移除,仅 v1 兼容层支持。)
     """
+    # FileStateCache 是内部状态容器(非 BaseModel、不参与校验/序列化),
+    # 告知 pydantic 放过它的 schema 生成。
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     messages: list[Message]
     turn_count: int = 1
     max_output_tokens_recovery_count: int = 0
@@ -180,6 +186,7 @@ class QueryState(BaseModel):
     has_attempted_autocompact: bool = False
     network_retry_count: int = 0
     transition: Continue | Terminal | None = None
+    read_file_state: FileStateCache  = field(default_factory=FileStateCache)
 
 
 @dataclass

@@ -42,7 +42,7 @@ def _check_optimistic_lock(ctx: ToolContext, path: str, current: str) -> None:
     当前磁盘完全一致,则视为未变、放行(兜底 mtime 假阳性,如云同步/杀软 touch)。
     全读/编辑后记录的是全文 → 相等即放行;局部读记录的是切片,与全文不等 → 要求重读。
     """
-    last = ctx.read_file_state.get(path)
+    last = ctx.query_state.read_file_state.get(path)
     cur_mtime = file_mtime_ms(path)
     if last is None or cur_mtime > last.timestamp:
         content_unchanged = last is not None and current == last.content
@@ -63,7 +63,7 @@ async def _edit_func(inp: EditInput, ctx: ToolContext) -> str:
     if not exists:
         if old == "":
             write_text(path, new)
-            ctx.read_file_state.set(
+            ctx.query_state.read_file_state.set(
                 path,
                 FileState(content=new, timestamp=file_mtime_ms(path), offset=None, limit=None),
             )
@@ -96,7 +96,7 @@ async def _edit_func(inp: EditInput, ctx: ToolContext) -> str:
 
     write_text(path, updated)
     # 更新锁:推进版本号到写后 mtime,置为全视图(后续 Edit 可走内容兜底)
-    ctx.read_file_state.set(
+    ctx.query_state.read_file_state.set(
         path,
         FileState(content=updated, timestamp=file_mtime_ms(path), offset=None, limit=None),
     )

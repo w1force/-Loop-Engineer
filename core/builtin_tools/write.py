@@ -41,7 +41,7 @@ def _check_optimistic_lock(ctx: ToolContext, path: str, current: str) -> None:
     没读过 → 抛;当前 mtime > 记录 timestamp → 判定被改;但若"记录的内容"与当前磁盘
     完全一致,则视为未变、放行。全读/编辑后记录全文 → 相等放行;局部读记录切片 → 要求重读。
     """
-    last = ctx.read_file_state.get(path)
+    last = ctx.query_state.read_file_state.get(path)
     cur_mtime = file_mtime_ms(path)
     if last is None or cur_mtime > last.timestamp:
         content_unchanged = last is not None and current == last.content
@@ -63,7 +63,7 @@ async def _write_func(inp: WriteInput, ctx: ToolContext) -> str:
     write_text(path, inp.content)            # 新建或覆盖(父目录不存在会自动建)
 
     # 更新锁:版本号推进到写后 mtime,置为全视图
-    ctx.read_file_state.set(
+    ctx.query_state.read_file_state.set(
         path,
         FileState(content=inp.content, timestamp=file_mtime_ms(path), offset=None, limit=None),
     )

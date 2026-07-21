@@ -88,8 +88,9 @@ async def _read_func(inp: ReadInput, ctx: ToolContext) -> str:
     # ── 去重缓存:同一文件 + 同样读取范围 + 自上次 Read 后 mtime 未变 → 不重发全文(省上下文) ──
     # 只对"上次 Read"留下的记录去重(prev.offset 非 None);Edit/Write 记录 offset=None,
     # 其内容模型并未以 Read 结果见过,故不对其去重。
+    read_file_state = ctx.query_state.read_file_state
     eff_offset = inp.offset if inp.offset is not None else 1
-    prev = ctx.read_file_state.get(path)
+    prev = read_file_state.get(path)
     if (
         prev is not None
         and prev.offset is not None
@@ -101,7 +102,7 @@ async def _read_func(inp: ReadInput, ctx: ToolContext) -> str:
         return "文件自上次 Read 后未改动(内容见此前的读取结果,此处不再重复输出)。"
 
     numbered, fs, _ = await read(inp.file_path, inp.offset, inp.limit)
-    ctx.read_file_state.set(path, fs)  # 乐观锁上锁:记录版本号 + 内容
+    read_file_state.set(path, fs)  # 乐观锁上锁:记录版本号 + 内容
     if numbered == "":
         return "(空文件)"
     return numbered

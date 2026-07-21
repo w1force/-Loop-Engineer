@@ -75,7 +75,7 @@ async def query_loop(
     pydantic.v1 兼容层、v2 原生已移除,revalidate_instances 不控制初始 copy),
     原地 extend/append 即累积到 agent_state.messages(跨 submit 持久)。
     """
-    state = QueryState.model_construct(messages=agent_state.messages, turn_count=1)  # ★ 引用同一 list
+    state = QueryState.model_construct(messages=agent_state.messages, turn_count=1, read_file_state=FileStateCache())  # ★ 引用同一 list
     chain = build_recovery_chain()
     turn_id = 0
 
