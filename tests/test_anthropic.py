@@ -5,8 +5,14 @@ stream 是 Phase 1 端到端直通的核心: parse_sse 只 yield str → json.lo
 import asyncio
 
 import httpx
+import pytest
 import respx
 
+from core.provider_errors import (
+    FatalProviderError,
+    PromptTooLongError,
+    TransientProviderError,
+)
 from core.providers.anthropic import AnthropicAdapter, to_anthropic, to_anthropic_tools
 from core.types import (
     AssistantMessage,
@@ -179,3 +185,104 @@ async def test_stream_ignores_ping_keepalive():
     types = [e.type for e in events]
     assert "ping" not in types  # 心跳被跳过
     assert types[-1] == "message_stop"  # 仍正常完成
+
+
+# ── adapter 抛分类异常 (Task 5) ──
+PROMPT_TOO_LONG_BODY = (
+    '{"type":"error","error":{"type":"invalid_request_error",'
+    '"message":"prompt is too long: 200000 tokens > 195000 maximum"}}'
+)
+
+
+@respx.mock
+async def test_classify_429_to_transient():
+    respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(429, text="rate"))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(TransientProviderError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass
+
+
+@respx.mock
+async def test_classify_500_to_transient():
+    respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(503, text="down"))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(TransientProviderError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass
+
+
+@respx.mock
+async def test_classify_prompt_too_long_400():
+    respx.post(f"{BASE}/v1/messages").mock(
+        return_value=httpx.Response(400, text=PROMPT_TOO_LONG_BODY))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(PromptTooLongError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass
+
+
+@respx.mock
+async def test_classify_other_400_to_fatal():
+    respx.post(f"{BASE}/v1/messages").mock(
+        return_value=httpx.Response(400, text='{"error":{"message":"bad model"}}'))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(FatalProviderError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass
+
+
+@respx.mock
+async def test_stream_overloaded_error_is_transient():
+    sse = (
+        'event: error\n'
+        'data: {"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}\n\n'
+    )
+    respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=sse))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(TransientProviderError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass
+
+
+@respx.mock
+async def test_stream_generic_error_is_fatal():
+    sse = (
+        'event: error\n'
+        'data: {"type":"error","error":{"type":"api_error","message":"boom"}}\n\n'
+    )
+    respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=sse))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(FatalProviderError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass
+
+
+@respx.mock
+async def test_transport_error_becomes_transient():
+    respx.post(f"{BASE}/v1/messages").mock(side_effect=httpx.ConnectError("conn refused"))
+    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    with pytest.raises(TransientProviderError):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")], system="", tools=[], model="m",
+            max_tokens=16, abort_signal=asyncio.Event(), tracer=NoopTracer(),
+        ):
+            pass

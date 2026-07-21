@@ -81,3 +81,20 @@ async def test_multiple_blocks_yield_multiple_block_level_assistants():
     out = [x async for x in aggregate_stream(_events(*seq), spy)]
     assts = _assts(out)
     assert len(assts) == 2  # 两个 block → 两条 block 级
+
+
+async def test_truncated_tool_input_dropped_not_raised():
+    """max_tokens 截断 tool_use input 中途: input_buf 残缺 → 丢弃 block, 不抛。"""
+    spy = SpyTracer()
+    seq = [
+        StreamEvent(type="message_start"),
+        StreamEvent(type="content_block_start", index=0,
+                    block={"type": "tool_use", "id": "c1", "name": "f", "input": {}}),
+        StreamEvent(type="content_block_delta", index=0,
+                    delta={"tool_input": '{"city": "Par'}),  # 残缺 JSON
+        StreamEvent(type="content_block_stop", index=0),
+        StreamEvent(type="message_delta", delta={"stop_reason": "max_tokens"}),
+        StreamEvent(type="message_stop"),
+    ]
+    out = [x async for x in aggregate_stream(_events(*seq), spy)]
+    assert _assts(out) == []  # 残缺 tool_use 被丢弃, 不 yield

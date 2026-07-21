@@ -63,7 +63,7 @@ class GrepInput(BaseModel):
 async def _grep_func(inp: GrepInput, ctx: ToolContext) -> str:
     lines = await grep(
         pattern=inp.pattern,
-        path=inp.path or ".",
+        path=inp.path or ctx.agent_state.cwd,
         glob=inp.glob,
         output_mode=inp.output_mode,
         case_insensitive=inp.case_insensitive,

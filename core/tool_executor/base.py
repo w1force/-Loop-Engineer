@@ -17,11 +17,18 @@ from pydantic import ValidationError
 
 from telemetry.events import TraceEvent, TraceKind
 
-logger = logging.getLogger("tool_executor")
 from telemetry.tracer import Tracer
 
 from ..tools import CanUseDecision, Tool, ToolContext
-from ..types import ToolResultBlock, ToolUseBlock
+from ..types import TextBlock, ToolResultBlock, ToolUseBlock
+
+logger = logging.getLogger("tool_executor")
+_PLACEHOLDER_REASON = "tool execution interrupted"
+
+
+def _placeholder(block: ToolUseBlock, reason: str = _PLACEHOLDER_REASON) -> ToolResultBlock:
+    """造 is_error 占位 result (执行前预设 / cancel / 续写未执行 都用它)。"""
+    return ToolResultBlock(tool_use_id=block.id, content=reason, is_error=True)
 
 
 @dataclass
@@ -29,16 +36,18 @@ class TrackedTool:
     """一次 tool_use 的执行档案。"""
 
     block: ToolUseBlock
+    result: ToolResultBlock  # 创建即占位(去 | None)
     status: Literal["queued", "executing", "completed", "cancelled"] = "queued"
-    result: ToolResultBlock | None = None
     task: asyncio.Task | None = None
 
 
-def _to_result(tool_use_id: str, ret: str | dict) -> ToolResultBlock:
-    """func 返回值适配 ToolResultBlock.content: str→str; dict→[dict]。"""
+def _to_result(tool_use_id: str, ret: str | TextBlock | list[TextBlock]) -> ToolResultBlock:
+    """func 返回值适配 ToolResultBlock.content: str→str; TextBlock→[block]; list→list。"""
     if isinstance(ret, str):
         return ToolResultBlock(tool_use_id=tool_use_id, content=ret)
-    return ToolResultBlock(tool_use_id=tool_use_id, content=[ret])
+    if isinstance(ret, TextBlock):
+        return ToolResultBlock(tool_use_id=tool_use_id, content=[ret])
+    return ToolResultBlock(tool_use_id=tool_use_id, content=ret)
 
 
 class ToolExecutor(ABC):
@@ -63,15 +72,15 @@ class ToolExecutor(ABC):
         self._tools[tool.name] = tool
 
     def add_tool(self, block: ToolUseBlock) -> None:
-        """收集 tool_use(block 级)。基类入队(保序); 未知工具直接造 error, 不调度。"""
+        """收集 tool_use(block 级)。基类入队(保序) + 预占位; 未知工具直接造 error。"""
         if self._discarded:
             return
-        tracked = TrackedTool(block=block)
+        tracked = TrackedTool(block=block, result=_placeholder(block))  # ★ 预占位
         self._tracked.append(tracked)
         _t = self._tools.get(block.name)
         _safe = "?" if _t is None else ("safe" if _t.is_concurrency_safe else "unsafe")
-        logger.info("add_tool %s %s input=%s [%s]", block.id, block.name, block.input, _safe)
-        if block.name not in self._tools:  # 未知工具: 直接 error(对齐 md §4.3)
+        logger.debug("add_tool %s %s input=%s [%s]", block.id, block.name, block.input, _safe)
+        if block.name not in self._tools:  # 未知工具: 覆盖占位为具体 error
             tracked.result = ToolResultBlock(
                 tool_use_id=block.id, content=f"未知工具: {block.name}", is_error=True
             )
@@ -88,15 +97,15 @@ class ToolExecutor(ABC):
         ...
 
     async def get_results(self) -> list[ToolResultBlock]:
-        """收尾: 保证全部执行完, 按 _tracked 顺序返回(保序); 丢弃被 discard 取消的(None)。"""
+        """收尾: 保证全部执行完, 按 _tracked 顺序返回(保序)。占位设计下 result 恒非 None。"""
         await self._run_all()
-        return [t.result for t in self._tracked if t.result is not None]
+        return [t.result for t in self._tracked]
 
     async def _execute_single(self, tracked: TrackedTool) -> None:
         """单工具全流程: 权限→校验→pre_execute→func; 失败一律 is_error, 不中断。"""
         block = tracked.block
         tracked.status = "executing"
-        logger.info("exec %s %s start", block.id, block.name)
+        logger.debug("exec %s %s start", block.id, block.name)
         _t0 = time.perf_counter()
         self._tracer.emit(
             TraceEvent(
@@ -136,7 +145,7 @@ class ToolExecutor(ABC):
             if result is not None:  # 正常完成或出错才有 result; 取消时跳过 emit END
                 tracked.result = result
                 tracked.status = "completed"
-                logger.info("exec %s %s done is_error=%s %.3fs",
+                logger.debug("exec %s %s done is_error=%s %.3fs",
                             block.id, block.name, result.is_error, time.perf_counter() - _t0)
                 self._tracer.emit(
                     TraceEvent(

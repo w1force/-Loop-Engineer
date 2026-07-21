@@ -16,10 +16,10 @@ from pydantic import BaseModel, ConfigDict
 
 from telemetry.tracer import Tracer
 
-from .types import ToolUseBlock
+from .types import TextBlock, ToolUseBlock
 
 if TYPE_CHECKING:
-    from .types import State
+    from .types import AgentState, QueryState
 
 
 def _not_impl(feature: str, phase: str) -> Never:
@@ -29,11 +29,17 @@ def _not_impl(feature: str, phase: str) -> Never:
 
 @dataclass
 class ToolContext:
-    """工具执行时注入的运行时上下文(LLM 参数之外)。各 tool 按需读取。"""
+    """工具执行时注入的运行时上下文。
+
+    双 state:
+    - agent_state: 跨 submit 的 agent 会话状态(工具取 file_read_state/skills/cwd)
+    - query_state: 单次 query_loop 内的循环状态(原 state 改名)
+    """
 
     tracer: Tracer
     abort_signal: asyncio.Event
-    state: "State | None" = None  # 预留:当前 agent 状态
+    agent_state: "AgentState"               # 必需:跨 submit(工具取 file_read_state/skills/cwd)
+    query_state: "QueryState | None" = None  # 单轮(原 state 改名)
 
 
 class CanUseDecision(BaseModel):
@@ -56,7 +62,7 @@ class Tool(BaseModel):
     input_model: type[BaseModel]
     # func/pre_execute 用 Callable[..., ...]:每个工具的 func 接受自己的 input_model(具体子类),
     # 声明 [BaseModel, ToolContext] 会因逆变被 pyright 拒;运行时由 input_model.model_validate 保证类型。
-    func: Callable[..., Awaitable[str | dict]]
+    func: Callable[..., Awaitable[str | TextBlock | list[TextBlock]]]
     is_concurrency_safe: bool = False  # 只读工具置 True,写工具默认 False(独占)
     pre_execute: Callable[..., Awaitable[None]] | None = None  # 语义校验钩子(预留)
 

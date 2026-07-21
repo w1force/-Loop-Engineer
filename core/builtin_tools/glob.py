@@ -48,7 +48,7 @@ class GlobInput(BaseModel):
 
 
 async def _glob_func(inp: GlobInput, ctx: ToolContext) -> str:
-    res = await glob(inp.pattern, inp.path or ".")
+    res = await glob(inp.pattern, inp.path or ctx.agent_state.cwd)
     if not res["files"]:
         return "No files found"
     lines = list(res["files"])
