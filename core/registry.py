@@ -8,11 +8,11 @@ plan 模式 / MCP 动态接入等非核心内容暂不实现。
 """
 from __future__ import annotations
 
-from .builtin_tools import GLOB_TOOL, GREP_TOOL
+from .builtin_tools import EDIT_TOOL, GLOB_TOOL, GREP_TOOL, READ_TOOL, WRITE_TOOL
 from .tools import Tool
 
 
-_BASE_TOOLS: list[Tool] = [GLOB_TOOL, GREP_TOOL]
+_BASE_TOOLS: list[Tool] = [GLOB_TOOL, GREP_TOOL, READ_TOOL, EDIT_TOOL, WRITE_TOOL]
 
 
 def get_all_base_tools() -> list[Tool]:

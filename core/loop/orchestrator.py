@@ -12,6 +12,7 @@ from typing import Callable, Literal, cast
 
 from ..provider import Provider
 from ..tool_executor import make_executor
+from ..file_state import FileStateCache
 from ..tools import Tool, ToolContext, default_can_use_tool
 from ..types import (
     ContentBlock,
@@ -62,6 +63,8 @@ async def query_loop(
     state = State(messages=params.messages, turn_count=1)
     #回扣机制
     chain = build_recovery_chain()
+    # 读后写乐观锁状态:必须跨 turn 共享,故在循环外建一份,每轮注入同一实例。
+    read_file_state = FileStateCache()
 
     while True:
         tracer.emit(TraceEvent(kind=TraceKind.TURN_START, turn=state.turn_count))
@@ -71,7 +74,12 @@ async def query_loop(
 
         # phase 2: 流式调 LLM + 聚合(边聚合边打点)
         # ctx：工具执行时框架提供的运行时上下文
-        ctx = ToolContext(tracer=tracer, abort_signal=params.abort_signal, state=state)
+        ctx = ToolContext(
+            tracer=tracer,
+            abort_signal=params.abort_signal,
+            state=state,
+            read_file_state=read_file_state,
+        )
         executor = make_executor(
             params.tool_execution_mode, params.tools, params.can_use_tool, tracer, ctx
         )

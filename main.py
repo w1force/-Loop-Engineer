@@ -32,7 +32,7 @@ async def main():
         transcript_path="run.transcript.jsonl",
     )
 
-    async for result in submit("我现在的项目中关于工具调用是怎么实现的？", config, tracer):
+    async for result in submit("你需要研究一下我的项目中关于工具调用的框架，然后在tests文件夹下面创建一个py文件实现一个demo", config, tracer):
         print(result)
 
 

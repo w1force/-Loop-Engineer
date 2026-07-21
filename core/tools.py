@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from typing_extensions import Never
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from telemetry.tracer import Tracer
 
+from .file_state import FileStateCache
 from .types import ToolUseBlock
 
 if TYPE_CHECKING:
@@ -33,7 +34,8 @@ class ToolContext:
 
     tracer: Tracer
     abort_signal: asyncio.Event
-    state: "State | None" = None  # 预留:当前 agent 状态
+    state: "State | None" = None  #LRU
+    read_file_state: FileStateCache = field(default_factory=FileStateCache)
 
 
 class CanUseDecision(BaseModel):
