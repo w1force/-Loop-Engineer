@@ -6,9 +6,10 @@ import asyncio
 
 from pydantic import BaseModel
 
+from core.file_state import FileStateCache
 from core.tools import Tool, ToolContext, default_can_use_tool
 from core.tool_executor.batch import BatchToolExecutor
-from core.types import AgentState, ToolUseBlock
+from core.types import AgentState, QueryState, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
