@@ -72,7 +72,7 @@ async def real_tool_demo():
 # ── 入口2: 真实 LLM ────────────────────────────────
     s = get_settings()
     provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url, debug_sse=s.debug_sse)
-    tracer = FileTracer(path=s.run_log_path, ctx={"chain_id": "demo"}, enabled=s.run_log_enabled)
+    tracer = FileTracer(ctx={"chain_id": "demo"}, enabled=s.run_log_enabled)
     config = AgentConfig(
         provider=provider,
         system=build_diagnose_system_prompt(),

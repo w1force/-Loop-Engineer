@@ -29,6 +29,7 @@ description: 排查 agent loop 运行问题时使用——用 jq 从运行日志
 | `tool_use_detected` | 流式检测到工具调用 | `tool_name`,`tool_use_id` |
 | `tool_exec_start` / `tool_exec_end` | 工具执行 | start:`tool_name`,`input`;end:`is_error`,`result`,`error` |
 | `recovery_attempt` | 兜底规则命中 | `rule`,`withheld` / `error` |
+| `tool_input_malformed` | LLM 的 tool_use input 非合法 object,被兜底成 {} | `tool_use_id`,`tool_name`,`reason`,`parsed_type`,**`raw_input_buf`** |
 | `run_error` | 未捕获异常(崩溃) | `type`,`message`,**`traceback`** |
 
 ## 定位日志文件
@@ -71,6 +72,12 @@ jq -c 'select(.kind=="llm_response")|.payload.raw_events[]|select(.type=="messag
 ```bash
 jq -c 'select(.kind=="tool_exec_end")|{is_error:.payload.is_error,result:.payload.result.content}' $F
 jq -c 'select(.kind=="tool_exec_end" and .payload.is_error)|.payload.error' $F   # 失败的工具(含 traceback)
+```
+
+### tool_use input 损坏(GLM 偶发返回 list/残缺 json,被兜底成 {})
+```bash
+jq -c 'select(.kind=="tool_input_malformed")|{turn,tool:.payload.tool_name,reason:.payload.reason,parsed_type:.payload.parsed_type}' $F
+jq -r 'select(.kind=="tool_input_malformed")|.payload.raw_input_buf' $F | head -1   # 看原始 input(GLM 到底返回了啥)
 ```
 
 ### 所有报错(一刀切)

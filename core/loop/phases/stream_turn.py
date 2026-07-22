@@ -33,9 +33,7 @@ def _to_block(b: dict):
     if t == "text":
         return TextBlock(text=b.get("text", ""))
     if t == "tool_use":
-        return ToolUseBlock(
-            id=b.get("id", ""), name=b.get("name", ""), input=b.get("input", {})
-        )
+        return ToolUseBlock(id=b.get("id", ""), name=b.get("name", ""), input=b.get("input", {}))
     if t == "thinking":
         return TextBlock(text=b.get("thinking", ""))
     if t == "redacted_thinking":
@@ -97,11 +95,30 @@ async def aggregate_stream(
                     continue
                 b = blocks[idx]
                 if b.get("type") == "tool_use":
+                    # ★ 内联解析 + 归一化。GLM 流式 input_json_delta 对 content 内引号转义不稳定,
+                    # 偶发把 input 返回成 list / 残缺 json / 非 dict。cc 假设 tool_use.input 一定是
+                    # object,这里把一切非 dict 统一兜底成 {}(不取首元素、不猜测),并 emit 一条
+                    # TOOL_INPUT_MALFORMED(含原始 input_buf)便于诊断 + jq 检索。
+                    raw_buf = b.pop("input_buf", "")
                     try:
-                        b["input"] = json.loads(b.pop("input_buf", "") or "{}")
+                        parsed = json.loads(raw_buf or "{}")
                     except json.JSONDecodeError:
-                        # max_tokens 截断导致 input 残缺: 丢弃该 block, 由 stop_reason withhold 兜底
-                        continue
+                        parsed = None
+                    if not isinstance(parsed, dict):
+                        tracer.emit(
+                            TraceEvent(
+                                kind=TraceKind.TOOL_INPUT_MALFORMED,
+                                payload={
+                                    "tool_use_id": b.get("id"),
+                                    "tool_name": b.get("name"),
+                                    "reason": "json_decode_error" if parsed is None else "not_dict",
+                                    "parsed_type": None if parsed is None else type(parsed).__name__,
+                                    "raw_input_buf": raw_buf,
+                                },
+                            )
+                        )
+                        parsed = {}
+                    b["input"] = parsed
                 raw_events.append({"type": "content_block_stop", "index": idx})
                 # block 级固化:每个 content_block_stop yield 一条只含该 block 的 AssistantMessage
                 yield AssistantMessage(content=[_to_block(b)])
