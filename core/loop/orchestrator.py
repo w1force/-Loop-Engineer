@@ -33,6 +33,7 @@ from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 from .phases.compact import maybe_compact
+from .phases.skill_listing import inject_skill_listing
 from .phases.stream_turn import StreamOutcome, stream_turn
 from .recovery.rules import build_recovery_chain
 
@@ -76,6 +77,10 @@ async def query_loop(
     原地 extend/append 即累积到 agent_state.messages(跨 submit 持久)。
     """
     state = QueryState.model_construct(messages=agent_state.messages, turn_count=1, read_file_state=FileStateCache())  # ★ 引用同一 list
+    # skill 目录去重注入:有新 skill 时,作为一条 user 消息插到
+    # 末尾 prompt 之前,进入稳定前缀被缓存;无新 skill 则 no-op。原地改 agent_state.messages,
+    # 与 state.messages 共享引用,故对本轮 stream_turn 立即可见。
+    inject_skill_listing(agent_state)
     chain = build_recovery_chain()
     turn_id = 0
 

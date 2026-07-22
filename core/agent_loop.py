@@ -80,23 +80,22 @@ def build_agent_state(config: AgentConfig) -> AgentState:
 
 
 def build_system_prompt(agent_state: AgentState, config: AgentConfig) -> str | list[dict]:
-    """生成最终 system:config.system + skill 目录(从 agent_state.skills,内联原
-    render_catalog/append_catalog 逻辑)。空 skills 原样返回 config.system。"""
     skills = agent_state.skills
     if not skills:
         return config.system
-    lines = ["", "", "<skills>"]
-    for m in skills:
-        desc = " ".join(m.description.split())
-        lines.append(f"- name: {m.name}")
-        lines.append(f"  description: {desc}")
-    lines.append("</skills>")
-    lines.append("")
-    lines.append("当用户请求匹配某个 skill 时,调用 load_skill(name) 加载完整指令后再执行。")
-    catalog = "\n".join(lines)
+    guidance = (
+        "\n\n# 关于 <system-reminder>\n"
+        "对话中可能出现 <system-reminder> 标签,里面是系统自动注入的环境信息与提醒"
+        "(例如下面提到的可用 skill 列表)。它们与所在的具体消息没有直接关系,是供你参考的"
+        "背景信息,不要把它们当作用户的提问来回应。\n"
+        "\n# Skill 使用说明\n"
+        "可用 skill 会在对话中以 \"The following skills are available...\" 的形式列出。"
+        "需要用到某个 skill 时,先查看该列表确定 skill 名,再调用 Load_Skill(name) 加载其"
+        "完整指令后执行。重要:只使用列表中列出的 skill,不要臆造或猜测 skill 名。"
+    )
     if isinstance(config.system, str):
-        return config.system + catalog
-    return [*config.system, {"type": "text", "text": catalog}]
+        return config.system + guidance
+    return [*config.system, {"type": "text", "text": guidance}]
 
 
 def is_result_successful(msg, stop_reason: str | None) -> bool:

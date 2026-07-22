@@ -198,6 +198,9 @@ class AgentState:
     """
     messages: list[Message] = field(default_factory=list)
     skills: list[SkillMeta] = field(default_factory=list)
+    # 已通告过的 skill 名(对齐 CC sentSkillNames):skill 目录只作为一条 user 消息
+    # 注入历史一次,之后靠此集合去重、不再重发 —— 保持前缀稳定、便于缓存命中。
+    sent_skill_names: set[str] = field(default_factory=set)
     file_read_state: FileReadState = field(default_factory=FileReadState)
     cwd: str = ""
     total_input_tokens: int = 0
