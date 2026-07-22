@@ -28,3 +28,5 @@ tmp-dir/
 # IDE / 编辑器
 .idea/
 .vscode/
+# 临时文件夹
+logs/

@@ -85,13 +85,6 @@ class AnthropicAdapter(BaseAdapter, Provider):
         tracer: Tracer,
         **opts,
     ) -> AsyncIterator[StreamEvent]:
-        # ★ 发请求前埋点(P2 §3.4)
-        tracer.emit(
-            TraceEvent(
-                kind=TraceKind.PROVIDER_REQUEST,
-                payload={"model": model, "msg_count": len(messages)},
-            )
-        )
         req_body = {
             "model": model,
             "messages": to_anthropic(messages),
@@ -100,7 +93,16 @@ class AnthropicAdapter(BaseAdapter, Provider):
             "max_tokens": max_tokens,
             "stream": True,
         }
-
+        # ★ 发请求前埋点(P2 §3.4);req_body 进 payload,run.jsonl 可查完整请求。
+        # LLM 完整响应(聚合 + LLM_RESPONSE 落盘)由 aggregate_stream 做 —— 它是 provider
+        # 无关的统一收口,所有 provider 的 stream 都经此,不必每个 provider 各写一份聚合。
+        # 本方法只管"发请求 + 透传事件",职责单一。
+        tracer.emit(
+            TraceEvent(
+                kind=TraceKind.PROVIDER_REQUEST,
+                payload={"model": model, "msg_count": len(messages), "req_body": req_body},
+            )
+        )
         logger.debug("request body: " + json.dumps(req_body, ensure_ascii=False, indent=2))
         try:
             async with self.http.stream("POST", "/v1/messages", json=req_body) as r:
@@ -110,7 +112,10 @@ class AnthropicAdapter(BaseAdapter, Provider):
                     tracer.emit(
                         TraceEvent(
                             kind=TraceKind.PROVIDER_ERROR,
-                            payload={"status": r.status_code, "body": body[:200]},
+                            payload={
+                                "status": r.status_code,
+                                "body": body[:500].decode("utf-8", "replace"),
+                            },
                         )
                     )
                     raise self._classify_status_error(r.status_code, body)

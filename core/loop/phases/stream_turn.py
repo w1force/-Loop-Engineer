@@ -33,9 +33,7 @@ def _to_block(b: dict):
     if t == "text":
         return TextBlock(text=b.get("text", ""))
     if t == "tool_use":
-        return ToolUseBlock(
-            id=b.get("id", ""), name=b.get("name", ""), input=b.get("input", {})
-        )
+        return ToolUseBlock(id=b.get("id", ""), name=b.get("name", ""), input=b.get("input", {}))
     if t == "thinking":
         return TextBlock(text=b.get("thinking", ""))
     if t == "redacted_thinking":
@@ -47,65 +45,122 @@ def _to_block(b: dict):
 async def aggregate_stream(
     events: AsyncIterator[StreamEvent], tracer: Tracer
 ) -> AsyncIterator[StreamEvent | AssistantMessage]:
-    """消费 provider 事件流,聚合出固化的 AssistantMessage。"""
+    """消费 provider 事件流:聚合 AssistantMessage(给业务)+ finally emit LLM_RESPONSE(给 run.jsonl)。
+
+    provider 无关的统一收口 —— 所有 provider 的 stream 都经此,LLM 完整响应(聚合 blocks +
+    非-delta raw_events + stop_reason/usage)在这里落盘,各 provider 不必各写一份聚合。
+    raw_events 只收非-delta 事件(delta 量大,内容已聚合进 blocks)。
+    """
     blocks: dict[int, dict] = {}
-    usage = Usage()
+    raw_events: list[dict] = []
     stop_reason: str | None = None
-    async for evt in events:
-        yield evt  # 原事件透传给外层
-        if evt.type == "content_block_start":
-            idx = evt.index
-            if idx is None:  # 守卫: 协议上 index 必有, 防御 pyright int|None
-                continue
-            blocks[idx] = dict(evt.block or {})
-            if (evt.block or {}).get("type") == "tool_use":  # ★ TOOL_USE_DETECTED
+    usage: dict = {}
+    error: dict | None = None
+    try:
+        async for evt in events:
+            yield evt  # 原事件透传给外层
+            if evt.type == "content_block_start":
+                idx = evt.index
+                if idx is None:  # 守卫: 协议上 index 必有, 防御 pyright int|None
+                    continue
+                blocks[idx] = dict(evt.block or {})
+                raw_events.append({"type": "content_block_start", "index": idx, "block": evt.block})
+                if (evt.block or {}).get("type") == "tool_use":  # ★ TOOL_USE_DETECTED
+                    tracer.emit(
+                        TraceEvent(
+                            kind=TraceKind.TOOL_USE_DETECTED,
+                            payload={
+                                "tool_name": (evt.block or {}).get("name"),
+                                "tool_use_id": (evt.block or {}).get("id"),
+                                "index": idx,
+                            },
+                        )
+                    )
+            elif evt.type == "content_block_delta":
+                idx = evt.index
+                if idx is None:  # 守卫: 防御 pyright int|None
+                    continue
+                b = blocks[idx]
+                d = evt.delta or {}
+                if "text" in d:
+                    b["text"] = b.get("text", "") + d["text"]
+                if "tool_input" in d:  # 累积 JSON 字符串,勿中途解析(红线#1)
+                    b["input_buf"] = b.get("input_buf", "") + d["tool_input"]
+                if "thinking" in d:  # thinking_delta:累积思考内容(思考模型)
+                    b["thinking"] = b.get("thinking", "") + d["thinking"]
+                # delta 不进 raw_events(量大,内容已聚合进 blocks)
+            elif evt.type == "content_block_stop":
+                idx = evt.index
+                if idx is None:  # 守卫: 防御 pyright int|None
+                    continue
+                b = blocks[idx]
+                if b.get("type") == "tool_use":
+                    # ★ 内联解析 + 归一化。GLM 流式 input_json_delta 对 content 内引号转义不稳定,
+                    # 偶发把 input 返回成 list / 残缺 json / 非 dict。cc 假设 tool_use.input 一定是
+                    # object,这里把一切非 dict 统一兜底成 {}(不取首元素、不猜测),并 emit 一条
+                    # TOOL_INPUT_MALFORMED(含原始 input_buf)便于诊断 + jq 检索。
+                    raw_buf = b.pop("input_buf", "")
+                    try:
+                        parsed = json.loads(raw_buf or "{}")
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if not isinstance(parsed, dict):
+                        tracer.emit(
+                            TraceEvent(
+                                kind=TraceKind.TOOL_INPUT_MALFORMED,
+                                payload={
+                                    "tool_use_id": b.get("id"),
+                                    "tool_name": b.get("name"),
+                                    "reason": "json_decode_error" if parsed is None else "not_dict",
+                                    "parsed_type": None if parsed is None else type(parsed).__name__,
+                                    "raw_input_buf": raw_buf,
+                                },
+                            )
+                        )
+                        parsed = {}
+                    b["input"] = parsed
+                raw_events.append({"type": "content_block_stop", "index": idx})
+                # block 级固化:每个 content_block_stop yield 一条只含该 block 的 AssistantMessage
+                yield AssistantMessage(content=[_to_block(b)])
+            elif evt.type == "message_start":
+                raw_events.append({"type": "message_start", "message": evt.message})
+            elif evt.type == "message_delta":  # 取 stop_reason/usage(供 STREAM_END + LLM_RESPONSE)
+                d = evt.delta or {}
+                if "stop_reason" in d:
+                    stop_reason = d["stop_reason"]
+                if evt.message and "usage" in evt.message:
+                    usage = evt.message["usage"]
+                raw_events.append({
+                    "type": "message_delta",
+                    "delta": evt.delta,
+                    "usage": (evt.message or {}).get("usage"),
+                })
+            elif evt.type == "message_stop":
                 tracer.emit(
                     TraceEvent(
-                        kind=TraceKind.TOOL_USE_DETECTED,
-                        payload={
-                            "tool_name": (evt.block or {}).get("name"),
-                            "tool_use_id": (evt.block or {}).get("id"),
-                            "index": idx,
-                        },
+                        kind=TraceKind.STREAM_END,
+                        payload={"stop_reason": stop_reason, "usage": usage},
                     )
                 )
-        elif evt.type == "content_block_delta":
-            idx = evt.index
-            if idx is None:  # 守卫: 防御 pyright int|None
-                continue
-            b = blocks[idx]
-            d = evt.delta or {}
-            if "text" in d:
-                b["text"] = b.get("text", "") + d["text"]
-            if "tool_input" in d:  # 累积 JSON 字符串,勿中途解析(红线#1)
-                b["input_buf"] = b.get("input_buf", "") + d["tool_input"]
-            if "thinking" in d:  # thinking_delta:累积思考内容(思考模型)
-                b["thinking"] = b.get("thinking", "") + d["thinking"]
-        elif evt.type == "content_block_stop":
-            idx = evt.index
-            if idx is None:  # 守卫: 防御 pyright int|None
-                continue
-            b = blocks[idx]
-            if b.get("type") == "tool_use":
-                try:
-                    b["input"] = json.loads(b.pop("input_buf", "") or "{}")
-                except json.JSONDecodeError:
-                    # max_tokens 截断导致 input 残缺: 丢弃该 block, 由 stop_reason withhold 兜底
-                    continue
-            # block 级固化:每个 content_block_stop yield 一条只含该 block 的 AssistantMessage
-            yield AssistantMessage(content=[_to_block(b)])
-        elif evt.type == "message_delta":  # 暂存,仅供 STREAM_END 埋点(stream_turn 由 Task 7 独立取)
-            stop_reason = (evt.delta or {}).get("stop_reason", stop_reason)
-            if evt.message and "usage" in evt.message:
-                usage = Usage(**evt.message["usage"])
-        elif evt.type == "message_stop":
-            tracer.emit(
-                TraceEvent(
-                    kind=TraceKind.STREAM_END,
-                    payload={"stop_reason": stop_reason, "usage": usage.model_dump()},
-                )
+                raw_events.append({"type": "message_stop"})
+                # 不再组装整轮 yield(由 stream_turn 收集 block 级后组装,见 Task 7)
+    except Exception as e:
+        # 聚合期间异常(如 provider 抛 ProviderError):记 error 字段后继续向上抛
+        error = {"type": type(e).__name__, "message": str(e)}
+        raise
+    finally:
+        tracer.emit(
+            TraceEvent(
+                kind=TraceKind.LLM_RESPONSE,
+                payload={
+                    "stop_reason": stop_reason,
+                    "usage": usage,
+                    "blocks": list(blocks.values()),
+                    "raw_events": raw_events,
+                    "error": error,
+                },
             )
-            # 不再组装整轮 yield(由 stream_turn 收集 block 级后组装,见 Task 7)
+        )
 
 
 class StreamOutcome(BaseModel):

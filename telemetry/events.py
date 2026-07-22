@@ -28,6 +28,10 @@ class TraceKind(str, Enum):
     # ── provider ──
     PROVIDER_REQUEST = "provider_request"
     PROVIDER_ERROR = "provider_error"
+    LLM_RESPONSE = "llm_response"  # ★ 完整 LLM 响应(聚合 blocks + 非-delta raw 事件 + stop_reason/usage)
+    TOOL_INPUT_MALFORMED = "tool_input_malformed"  # ★ LLM 返回的 tool_use input 不是合法 object,被兜底成 {}
+    # ── 运行级 ──
+    RUN_ERROR = "run_error"  # ★ agent loop 未捕获异常兜底(submit try/except)
 
 
 class TraceEvent(BaseModel):

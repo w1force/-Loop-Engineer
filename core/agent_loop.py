@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import logging
 import os
+import traceback
 from typing import Callable, Literal
 
 from core.registry import get_tools
@@ -38,6 +39,7 @@ from .types import (
     TextBlock,
     UserMessage,
 )
+from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,32 @@ def _rough_cost(input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * 3 + output_tokens * 15) / 1_000_000
 
 
+async def _traced_query_loop(
+    agent_state: AgentState, params: QueryParams, tracer: Tracer
+) -> AsyncIterator[Message | StreamEvent | Tombstone]:
+    """query_loop 的错误兜底包装:冒泡的未捕获异常落 run.jsonl(RUN_ERROR)后再抛。
+
+    纯透传:yield 上游每条消息,语义不变;仅在抛异常时补一条 RUN_ERROR 埋点,
+    使 submit 的主循环不必用 try/except 包裹(职责分离 + 少一层缩进)。
+    GeneratorExit(submit 提前 return 时)不被 except Exception 捕获,不会误报。
+    """
+    try:
+        async for msg in query_loop(agent_state, params, tracer):
+            yield msg
+    except Exception as e:
+        tracer.emit(
+            TraceEvent(
+                kind=TraceKind.RUN_ERROR,
+                payload={
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                },
+            )
+        )
+        raise
+
+
 async def submit(
     prompt: str, agent_state: AgentState, config: AgentConfig, tracer: Tracer
 ) -> AsyncIterator[dict]:
@@ -157,7 +185,7 @@ async def submit(
     )
 
     last_stop_reason: str | None = None
-    async for msg in query_loop(agent_state, params, tracer):   # ★ agent_state 传入
+    async for msg in _traced_query_loop(agent_state, params, tracer):   # ★ 错误兜底在 helper 里
         if isinstance(msg, AssistantMessage):
             # query_loop 内 state.messages.extend 已把整轮 AssistantMessage 累积进
             # agent_state.messages(同 list 引用);此处不重复 append,仅落盘 + 统计。

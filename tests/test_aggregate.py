@@ -83,8 +83,8 @@ async def test_multiple_blocks_yield_multiple_block_level_assistants():
     assert len(assts) == 2  # 两个 block → 两条 block 级
 
 
-async def test_truncated_tool_input_dropped_not_raised():
-    """max_tokens 截断 tool_use input 中途: input_buf 残缺 → 丢弃 block, 不抛。"""
+async def test_truncated_tool_input_falls_back_to_empty_not_raised():
+    """input_buf 残缺(max_tokens 截断)→ 兜底成 {} 不抛,emit TOOL_INPUT_MALFORMED 记录原始。"""
     spy = SpyTracer()
     seq = [
         StreamEvent(type="message_start"),
@@ -97,4 +97,10 @@ async def test_truncated_tool_input_dropped_not_raised():
         StreamEvent(type="message_stop"),
     ]
     out = [x async for x in aggregate_stream(_events(*seq), spy)]
-    assert _assts(out) == []  # 残缺 tool_use 被丢弃, 不 yield
+    assts = _assts(out)
+    assert len(assts) == 1  # 不丢弃,固化 input={}
+    assert assts[0].content == [ToolUseBlock(id="c1", name="f", input={})]
+    malformed = [e for e in spy.events if e.kind is TraceKind.TOOL_INPUT_MALFORMED]
+    assert len(malformed) == 1
+    assert malformed[0].payload["reason"] == "json_decode_error"
+    assert malformed[0].payload["raw_input_buf"] == '{"city": "Par'
