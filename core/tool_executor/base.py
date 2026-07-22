@@ -134,7 +134,7 @@ class ToolExecutor(ABC):
         except ValidationError as e:
             error_info = {"type": type(e).__name__, "message": str(e)}
             result = ToolResultBlock(
-                tool_use_id=block.id, content=f"参数校验失败: {e}", is_error=True
+                tool_use_id=block.id, content=f"<tool_use_error>参数校验失败: {e}</tool_use_error>", is_error=True
             )
         except asyncio.CancelledError:
             # 被 discard 取消: 不造 result, 重新抛出让 task 正常进入 cancelled 态
