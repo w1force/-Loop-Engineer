@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -110,10 +111,11 @@ class ToolExecutor(ABC):
         self._tracer.emit(
             TraceEvent(
                 kind=TraceKind.TOOL_EXEC_START,
-                payload={"tool_name": block.name, "tool_use_id": block.id},
+                payload={"tool_name": block.name, "tool_use_id": block.id, "input": block.input},
             )
         )
         result: ToolResultBlock | None = None
+        error_info: dict | None = None  # ★ 异常详情(供 END emit 落 run.jsonl)
         try:
             tool = self._tools.get(block.name)
             if tool is None:  # 防御兜底(正常在 add_tool 已处理)
@@ -130,6 +132,7 @@ class ToolExecutor(ABC):
                 ret = await tool.func(validated, self._ctx)
                 result = _to_result(block.id, ret)
         except ValidationError as e:
+            error_info = {"type": type(e).__name__, "message": str(e)}
             result = ToolResultBlock(
                 tool_use_id=block.id, content=f"参数校验失败: {e}", is_error=True
             )
@@ -138,6 +141,11 @@ class ToolExecutor(ABC):
             tracked.status = "cancelled"
             raise
         except Exception as e:  # func/pre_execute 异常
+            error_info = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            }
             result = ToolResultBlock(
                 tool_use_id=block.id, content=f"工具执行错误: {e}", is_error=True
             )
@@ -147,11 +155,15 @@ class ToolExecutor(ABC):
                 tracked.status = "completed"
                 logger.debug("exec %s %s done is_error=%s %.3fs",
                             block.id, block.name, result.is_error, time.perf_counter() - _t0)
+                end_payload: dict = {
+                    "tool_use_id": block.id,
+                    "is_error": result.is_error,
+                    "result": result.model_dump(),  # 含 content(str|list[TextBlock→dict]) + is_error
+                }
+                if error_info is not None:  # 异常路径:补 error 详情(type/message/traceback)
+                    end_payload["error"] = error_info
                 self._tracer.emit(
-                    TraceEvent(
-                        kind=TraceKind.TOOL_EXEC_END,
-                        payload={"tool_use_id": block.id, "is_error": result.is_error},
-                    )
+                    TraceEvent(kind=TraceKind.TOOL_EXEC_END, payload=end_payload)
                 )
 
     def discard(self) -> None:

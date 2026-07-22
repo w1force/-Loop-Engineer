@@ -81,7 +81,8 @@ async def query_loop(
 
     while True:
         turn_id += 1                                          # ★ 每次 stream_turn(含重试)递增
-        tracer.emit(TraceEvent(kind=TraceKind.TURN_START, turn=state.turn_count))
+        tracer = tracer.child(turn=state.turn_count)   # ★ 重新绑定为带 turn 的子 tracer;同轮所有 emit(请求/工具/recovery/transition)自动带 turn,可按 turn join
+        tracer.emit(TraceEvent(kind=TraceKind.TURN_START))
         state = await maybe_compact(agent_state, state, params, tracer)
 
         ctx = ToolContext(tracer=tracer, abort_signal=params.abort_signal,
@@ -117,6 +118,7 @@ async def query_loop(
 
         # stream_turn 成功 → 网络通, 清重试计数
         state.network_retry_count = 0
+        tracer.emit(TraceEvent(kind=TraceKind.TURN_END, payload={"stop_reason": outcome.stop_reason}))
 
         # withheld 优先于 needs_follow_up (max_tokens 截断不执行残缺工具)。
         # 残缺 assistant 不入 messages:escalate 第一档丢弃本轮重发(只改 max_tokens);

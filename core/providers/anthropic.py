@@ -85,13 +85,6 @@ class AnthropicAdapter(BaseAdapter, Provider):
         tracer: Tracer,
         **opts,
     ) -> AsyncIterator[StreamEvent]:
-        # ★ 发请求前埋点(P2 §3.4)
-        tracer.emit(
-            TraceEvent(
-                kind=TraceKind.PROVIDER_REQUEST,
-                payload={"model": model, "msg_count": len(messages)},
-            )
-        )
         req_body = {
             "model": model,
             "messages": to_anthropic(messages),
@@ -100,8 +93,26 @@ class AnthropicAdapter(BaseAdapter, Provider):
             "max_tokens": max_tokens,
             "stream": True,
         }
-
+        # ★ 发请求前埋点(P2 §3.4);req_body 进 payload,run.jsonl 可查完整请求
+        tracer.emit(
+            TraceEvent(
+                kind=TraceKind.PROVIDER_REQUEST,
+                payload={"model": model, "msg_count": len(messages), "req_body": req_body},
+            )
+        )
         logger.debug("request body: " + json.dumps(req_body, ensure_ascii=False, indent=2))
+        # _record_response 是纯旁路:透传 _raw_events 的所有事件(对外语义不变),
+        # 同时聚合出完整 LLM 响应,finally emit 一条 LLM_RESPONSE 落 run.jsonl。
+        async for evt in self._record_response(tracer, self._raw_events(req_body, tracer)):
+            yield evt
+
+    async def _raw_events(
+        self, req_body: dict, tracer: Tracer
+    ) -> AsyncIterator[StreamEvent]:
+        """发请求 + 解析 SSE + yield StreamEvent;错误分类后抛(供上层 recovery 责任链)。
+
+        从原 stream 抽出,使 stream 能在外层套 _record_response 聚合旁路。
+        """
         try:
             async with self.http.stream("POST", "/v1/messages", json=req_body) as r:
                 _t0 = time.perf_counter()  # 计时基准(仅 self._debug_sse 用)
@@ -110,7 +121,10 @@ class AnthropicAdapter(BaseAdapter, Provider):
                     tracer.emit(
                         TraceEvent(
                             kind=TraceKind.PROVIDER_ERROR,
-                            payload={"status": r.status_code, "body": body[:200]},
+                            payload={
+                                "status": r.status_code,
+                                "body": body[:500].decode("utf-8", "replace"),
+                            },
                         )
                     )
                     raise self._classify_status_error(r.status_code, body)
@@ -140,6 +154,82 @@ class AnthropicAdapter(BaseAdapter, Provider):
                 )
             )
             raise TransientProviderError(f"transport error: {e}") from e
+
+    async def _record_response(
+        self, tracer: Tracer, inner: AsyncIterator[StreamEvent]
+    ) -> AsyncIterator[StreamEvent]:
+        """透传 inner 事件 + 聚合出完整 LLM 响应,finally emit 一条 LLM_RESPONSE。
+
+        纯旁路:不改 inner 的产出与异常语义(异常仍向 query_loop 传播)。
+        聚合参考 stream_turn.aggregate_stream(start 建桶/delta 累积/stop 固化),
+        放 provider 层仅为日志用(不 import phase 层,避免 core→core.loop 反向依赖)。
+        raw_events 只收非-delta 事件(delta 量大,内容已聚合进 blocks)。
+        """
+        blocks: dict[int, dict] = {}
+        raw_events: list[dict] = []
+        stop_reason: str | None = None
+        usage: dict = {}
+        error: dict | None = None
+        try:
+            async for evt in inner:
+                yield evt  # ★ 透传给上层(aggregate_stream),行为不变
+                if evt.type == "content_block_start":
+                    idx = evt.index
+                    if idx is not None:
+                        blocks[idx] = dict(evt.block or {})
+                    raw_events.append({"type": "content_block_start", "index": idx, "block": evt.block})
+                elif evt.type == "content_block_delta":
+                    idx = evt.index
+                    b = blocks.get(idx) if idx is not None else None
+                    if b is None:
+                        continue
+                    d = evt.delta or {}
+                    if "text" in d:
+                        b["text"] = b.get("text", "") + d["text"]
+                    if "tool_input" in d:
+                        b["input_buf"] = b.get("input_buf", "") + d["tool_input"]
+                    # delta 不进 raw_events(量大,内容已聚合进 blocks)
+                elif evt.type == "content_block_stop":
+                    idx = evt.index
+                    b = blocks.get(idx) if idx is not None else None
+                    if b is not None and b.get("type") == "tool_use":
+                        try:
+                            b["input"] = json.loads(b.pop("input_buf", "") or "{}")
+                        except json.JSONDecodeError:
+                            pass  # 截断残缺:保留 input_buf 供日志诊断
+                    raw_events.append({"type": "content_block_stop", "index": idx})
+                elif evt.type == "message_start":
+                    raw_events.append({"type": "message_start", "message": evt.message})
+                elif evt.type == "message_delta":
+                    d = evt.delta or {}
+                    if "stop_reason" in d:
+                        stop_reason = d["stop_reason"]
+                    if evt.message and "usage" in evt.message:
+                        usage = evt.message["usage"]
+                    raw_events.append({
+                        "type": "message_delta",
+                        "delta": evt.delta,
+                        "usage": (evt.message or {}).get("usage"),
+                    })
+                elif evt.type == "message_stop":
+                    raw_events.append({"type": "message_stop"})
+        except Exception as e:
+            # _raw_events 抛出的 ProviderError(或其它异常):记 error 字段后继续向上抛
+            error = {"type": type(e).__name__, "message": str(e)}
+            raise
+        finally:
+            tracer.emit(
+                TraceEvent(
+                    kind=TraceKind.LLM_RESPONSE,
+                    payload={
+                        "stop_reason": stop_reason,
+                        "usage": usage,
+                        "blocks": list(blocks.values()),
+                        "raw_events": raw_events,
+                        "error": error,
+                    },
+                )
+            )
 
     @staticmethod
     def _classify_status_error(status: int, body: bytes) -> ProviderError:

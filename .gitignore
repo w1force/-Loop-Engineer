@@ -24,3 +24,6 @@ main-lwt.py
 tmp-dir/
 *.log
 .serena/
+
+# 临时文件夹
+logs/
