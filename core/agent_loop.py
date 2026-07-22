@@ -33,6 +33,8 @@ from .types import (
     FileReadState,
     Message,
     StreamEvent,
+    Terminal,
+    TerminalReason,
     Tombstone,
     TextBlock,
     UserMessage,
@@ -198,6 +200,30 @@ async def submit(
         elif isinstance(msg, StreamEvent):
             # 流式 token 事件; 本期无 UI 暂不处理, 留位置供未来实时显示/hook
             continue
+        elif isinstance(msg, Terminal):
+            # 异常终止信号:query_loop 只对非 COMPLETED 的终止 yield Terminal
+            # (MAX_TURNS / MODEL_ERROR / PROMPT_TOO_LONG 等)。这里按 reason 出专属
+            # error subtype 并 return,绕过下方"最后一条恰好是 tool_result 就假成功、
+            # text 为空"的兜底判定。对齐 CC QueryEngine.ts:is_error + error_max_turns,
+            # text 取最后一条 assistant(可能为空,但 subtype 已明确是 error)。
+            subtype = {
+                TerminalReason.MAX_TURNS: "error_max_turns",
+                TerminalReason.MODEL_ERROR: "error_model",
+                TerminalReason.PROMPT_TOO_LONG: "error_prompt_too_long",
+                TerminalReason.BUDGET_EXCEEDED: "error_budget",
+            }.get(msg.reason, "error_during_execution")
+            yield {
+                "type": "result",
+                "subtype": subtype,
+                "is_error": True,
+                "error": msg.error or f"terminated: {msg.reason.value}",
+                "text": _extract_text(_last_message(agent_state.messages, ("assistant",))),
+                "usage": {
+                    "input_tokens": agent_state.total_input_tokens,
+                    "output_tokens": agent_state.total_output_tokens,
+                },
+            }
+            return
 
         if config.max_budget_usd is not None and _rough_cost(
             agent_state.total_input_tokens, agent_state.total_output_tokens

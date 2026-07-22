@@ -75,8 +75,10 @@ WRITE_TOOL = build_tool(
     name="Write",
     description=(
         "整文件写入:用 content 覆盖已存在文件,或新建文件。与 Edit 的区别是 Write "
-        "换整个文件、Edit 改一段。覆盖已存在文件前必须先 Read(乐观锁:防止覆盖掉他人改动);"
-        "新建文件则无需先读。"
+        "换整个文件、Edit 改一段。改动已存在文件时优先用 Edit —— 它只发送 diff(改动片段)、"
+        "省 token 也更快;本工具只用于新建文件或整份重写。除非用户明确要求,否则不要新建文件,"
+        "尤其不要擅自创建 .md / README 等文档。覆盖已存在文件前必须先 Read(乐观锁:防止覆盖掉"
+        "他人改动);新建文件则无需先读。"
     ),
     input_model=WriteInput,
     func=_write_func,
