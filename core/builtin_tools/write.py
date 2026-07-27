@@ -35,6 +35,10 @@ class WriteInput(BaseModel):
     content: str = Field(description="写入的完整文件内容(整文件覆盖;文件不存在则新建)")
 
 
+# 兼容旧测试/旧调用方的名称。
+WriteIn = WriteInput
+
+
 def _check_optimistic_lock(ctx: ToolContext, path: str, current: str) -> None:
     """覆盖已存在文件前的乐观锁校验(逻辑与 Edit 对称)。
 

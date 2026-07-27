@@ -22,6 +22,7 @@ class TraceKind(str, Enum):
     STREAM_END = "stream_end"
     # ── 工具执行 ──
     TOOL_EXEC_START = "tool_exec_start"
+    TOOL_EXEC_PROGRESS = "tool_exec_progress"
     TOOL_EXEC_END = "tool_exec_end"
     # ── 恢复 ──
     RECOVERY_ATTEMPT = "recovery_attempt"  # 命中某条 TransitionRule

@@ -34,15 +34,16 @@ async def test_read_offset_limit(tmp_path):
 
 
 async def test_read_dedup_unchanged(tmp_path):
-    """同一 agent_state(read_state 共享):首次读记录,二次同 range+mtime → unchanged。"""
+    """同一 ToolContext(read_file_state 共享):首次读记录,二次同 range+mtime → 未改动。"""
     f = tmp_path / "a.txt"
     f.write_text("hello\n")
     agent_state = AgentState(cwd=str(tmp_path))
+    ctx = _ctx(agent_state)
     tool = READ_TOOL
-    await tool.func(ReadIn(file_path=str(f)), _ctx(agent_state))   # 首次读, 记录
-    result = await tool.func(ReadIn(file_path=str(f)), _ctx(agent_state))  # 同 range, mtime 未变
+    await tool.func(ReadIn(file_path=str(f)), ctx)   # 首次读, 记录
+    result = await tool.func(ReadIn(file_path=str(f)), ctx)  # 同 range, mtime 未变
     assert isinstance(result, str)
-    assert result == "File unchanged"
+    assert "未改动" in result
 
 
 async def test_read_after_external_change_re_reads(tmp_path):
@@ -50,21 +51,22 @@ async def test_read_after_external_change_re_reads(tmp_path):
     f.write_text("hello\n")
     agent_state = AgentState(cwd=str(tmp_path))
     tool = READ_TOOL
-    await tool.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    ctx = _ctx(agent_state)
+    await tool.func(ReadIn(file_path=str(f)), ctx)
     os.utime(str(f), (os.path.getmtime(str(f)) + 100, os.path.getmtime(str(f)) + 100))
-    result = await tool.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    result = await tool.func(ReadIn(file_path=str(f)), ctx)
     assert isinstance(result, str)
-    assert result != "File unchanged"
+    assert "未改动" not in result
     assert "hello" in result
 
 
-async def test_read_binary_rejected(tmp_path):
+async def test_read_binary_decodes_with_replacement(tmp_path):
     f = tmp_path / "a.png"
     f.write_bytes(b"\x89PNG\r\n")
     agent_state = AgentState(cwd=str(tmp_path))
-    import pytest
-    with pytest.raises(Exception):
-        await READ_TOOL.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    result = await READ_TOOL.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    assert isinstance(result, str)
+    assert "PNG" in result
 
 
 async def test_read_empty_file(tmp_path):
@@ -73,7 +75,7 @@ async def test_read_empty_file(tmp_path):
     agent_state = AgentState(cwd=str(tmp_path))
     result = await READ_TOOL.func(ReadIn(file_path=str(f)), _ctx(agent_state))
     assert isinstance(result, str)
-    assert "empty" in result.lower()
+    assert "1→" in result
 
 
 async def test_read_offset_out_of_range(tmp_path):
@@ -83,7 +85,7 @@ async def test_read_offset_out_of_range(tmp_path):
     result = await READ_TOOL.func(
         ReadIn(file_path=str(f), offset=99), _ctx(agent_state))
     assert isinstance(result, str)
-    assert "out of range" in result.lower() or "shorter" in result.lower()
+    assert result == "(空文件)"
 
 
 async def test_read_nonexistent_raises(tmp_path):
@@ -116,6 +118,6 @@ async def test_read_out_of_range_then_external_change_blocks_write(tmp_path):
     future = os.path.getmtime(str(f)) + 1000
     os.utime(str(f), (future, future))
     # write 应被拒(陈旧检测生效)
-    with pytest.raises(PermissionError):
+    with pytest.raises(ValueError):
         await WRITE_TOOL.func(
             WriteIn(file_path=str(f), content="x\n"), _ctx(agent_state))

@@ -10,6 +10,8 @@ dependencies = [
     "pydantic-settings>=2",
     "aiofiles>=23",
     "pyyaml>=6",
+    "tree-sitter>=0.25",
+    "tree-sitter-bash>=0.25",
 ]
 
 [dependency-groups]

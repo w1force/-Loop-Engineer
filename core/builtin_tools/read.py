@@ -83,6 +83,10 @@ class ReadInput(BaseModel):
     limit: int | None = Field(default=None, description="读取的行数;省略则读到文件末尾")
 
 
+# 兼容旧测试/旧调用方的名称。
+ReadIn = ReadInput
+
+
 async def _read_func(inp: ReadInput, ctx: ToolContext) -> str:
     path = expand_path(inp.file_path)
     # ── 去重缓存:同一文件 + 同样读取范围 + 自上次 Read 后 mtime 未变 → 不重发全文(省上下文) ──

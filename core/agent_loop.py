@@ -17,9 +17,9 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import logging
 import os
-from typing import Callable, Literal
+from typing import Callable, Literal, Protocol
 
-from core.registry import get_tools
+from core.registry import assemble_tool_pool, get_tools
 
 from .loop.orchestrator import QueryParams, query_loop
 from .provider import Provider
@@ -41,6 +41,16 @@ from telemetry.tracer import Tracer
 logger = logging.getLogger(__name__)
 
 
+class ToolProvider(Protocol):
+    """外部工具提供者协议。
+
+    这里刻意只要求 get_tools(): list[Tool],让 MCP manager、未来的插件 manager
+    都能以同一种形状接入 query_loop,不把 agent_loop 绑死到 MCP 细节。
+    """
+
+    async def get_tools(self) -> list[Tool]: ...
+
+
 @dataclass
 class AgentConfig:
     provider: Provider
@@ -57,6 +67,19 @@ class AgentConfig:
     tool_execution_mode: Literal["streaming", "batch"] = "streaming"
     skill_dirs: list[str] = field(default_factory=lambda: ["skills/"])
     cwd: str = field(default_factory=os.getcwd)   # ★ Task 4 新增
+    mcp_manager: ToolProvider | None = None
+
+    async def resolve_tools(self) -> list[Tool]:
+        """组合内置工具、调用方显式工具和 MCP 工具。
+
+        MCP 工具来自 mcp_manager,再交给 registry.assemble_tool_pool 做稳定排序
+        和去重;内置工具优先。
+        """
+        # 对齐 Claude Code 的思路:QueryEngine/agent_loop 不关心 MCP client 怎么连,
+        # 只在发模型请求前拿到一份完整工具池。这样 provider 和 executor 仍只认 Tool。
+        base_tools = get_tools(False) + list(self.tools)
+        mcp_tools = await self.mcp_manager.get_tools() if self.mcp_manager else []
+        return assemble_tool_pool(base_tools, mcp_tools)
 
 
 def build_agent_state(config: AgentConfig) -> AgentState:
@@ -140,7 +163,7 @@ async def submit(
     # Task 4: skill 目录从 agent_state.skills(build_agent_state 已扫描)拼到 system。
     # Task 3: builtin_tools() 无参(func 从 ctx.agent_state 取,含 load_skill_tool)。
     system = build_system_prompt(agent_state, config)
-    tools = get_tools(False)    # 获取工具 
+    tools = await config.resolve_tools()    # 获取内置工具 + 显式工具 + MCP 工具
 
     params = QueryParams(
         system=system,
