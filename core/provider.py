@@ -45,7 +45,7 @@ class BaseAdapter:
         self.http = httpx.AsyncClient(
             base_url=base_url,
             headers=headers,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx.Timeout(60.0, connect=10.0, read=300.0),  # read 放宽到 300s:流式长输出(尤其 escalate 到大 max_tokens 后)首 chunk / chunk 间隔需更久,60s 易 ReadTimeout
         )
 
     async def aclose(self) -> None:

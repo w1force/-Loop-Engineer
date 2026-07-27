@@ -25,7 +25,7 @@ async def _load(inp: LoadSkillInput, ctx: ToolContext) -> str:
 
 LOAD_SKILL_TOOL = build_tool(
     name="Load_Skill",
-    description="加载指定 skill 的完整指令。先看 <skills> 目录决定用哪个 skill,再调用此工具。",
+    description="加载指定 skill 的完整指令。先查看对话中列出的可用 skill 列表决定用哪个 skill,再调用此工具。",
     input_model=LoadSkillInput,
     func=_load,
     is_concurrency_safe=True,

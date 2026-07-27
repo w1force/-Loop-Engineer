@@ -18,24 +18,28 @@ from dataclasses import dataclass, field
 import logging
 import os
 from typing import Callable, Literal, Protocol
+import traceback
 
 from core.registry import assemble_tool_pool, get_tools
 
 from .loop.orchestrator import QueryParams, query_loop
 from .provider import Provider
+from .session_memory import maybe_extract_session_memory
 from .skills.loader import SkillLoader
 from .tools import Tool, default_can_use_tool
 from .transcript import record_transcript
 from .types import (
     AgentState,
     AssistantMessage,
-    FileReadState,
     Message,
     StreamEvent,
+    Terminal,
+    TerminalReason,
     Tombstone,
     TextBlock,
     UserMessage,
 )
+from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
 
 logger = logging.getLogger(__name__)
@@ -83,7 +87,7 @@ class AgentConfig:
 
 
 def build_agent_state(config: AgentConfig) -> AgentState:
-    """调用者初始化 agent_state:scan skills(异常降级)+ 新建 FileReadState + 设 cwd
+    """调用者初始化 agent_state:scan skills(异常降级)+ 新建文件状态缓存 + 设 cwd
     + 迁移 initial_messages(解决 Task 2 initial_messages 死字段 concern)。"""
     try:
         skills = SkillLoader.scan(config.skill_dirs)
@@ -93,29 +97,27 @@ def build_agent_state(config: AgentConfig) -> AgentState:
     return AgentState(
         messages=[*config.initial_messages],
         skills=skills,
-        file_read_state=FileReadState(),
         cwd=config.cwd,
     )
 
 
 def build_system_prompt(agent_state: AgentState, config: AgentConfig) -> str | list[dict]:
-    """生成最终 system:config.system + skill 目录(从 agent_state.skills,内联原
-    render_catalog/append_catalog 逻辑)。空 skills 原样返回 config.system。"""
     skills = agent_state.skills
     if not skills:
         return config.system
-    lines = ["", "", "<skills>"]
-    for m in skills:
-        desc = " ".join(m.description.split())
-        lines.append(f"- name: {m.name}")
-        lines.append(f"  description: {desc}")
-    lines.append("</skills>")
-    lines.append("")
-    lines.append("当用户请求匹配某个 skill 时,调用 load_skill(name) 加载完整指令后再执行。")
-    catalog = "\n".join(lines)
+    guidance = (
+        "\n\n# 关于 <system-reminder>\n"
+        "对话中可能出现 <system-reminder> 标签,里面是系统自动注入的环境信息与提醒"
+        "(例如下面提到的可用 skill 列表)。它们与所在的具体消息没有直接关系,是供你参考的"
+        "背景信息,不要把它们当作用户的提问来回应。\n"
+        "\n# Skill 使用说明\n"
+        "可用 skill 会在对话中以 \"The following skills are available...\" 的形式列出。"
+        "需要用到某个 skill 时,先查看该列表确定 skill 名,再调用 Load_Skill(name) 加载其"
+        "完整指令后执行。重要:只使用列表中列出的 skill,不要臆造或猜测 skill 名。"
+    )
     if isinstance(config.system, str):
-        return config.system + catalog
-    return [*config.system, {"type": "text", "text": catalog}]
+        return config.system + guidance
+    return [*config.system, {"type": "text", "text": guidance}]
 
 
 def is_result_successful(msg, stop_reason: str | None) -> bool:
@@ -144,6 +146,32 @@ def _extract_text(msg) -> str:
 def _rough_cost(input_tokens: int, output_tokens: int) -> float:
     # 占位估算($3/M input + $15/M output 量级);Phase 6 再精确化
     return (input_tokens * 3 + output_tokens * 15) / 1_000_000
+
+
+async def _traced_query_loop(
+    agent_state: AgentState, params: QueryParams, tracer: Tracer
+) -> AsyncIterator[Message | StreamEvent | Tombstone]:
+    """query_loop 的错误兜底包装:冒泡的未捕获异常落 run.jsonl(RUN_ERROR)后再抛。
+
+    纯透传:yield 上游每条消息,语义不变;仅在抛异常时补一条 RUN_ERROR 埋点,
+    使 submit 的主循环不必用 try/except 包裹(职责分离 + 少一层缩进)。
+    GeneratorExit(submit 提前 return 时)不被 except Exception 捕获,不会误报。
+    """
+    try:
+        async for msg in query_loop(agent_state, params, tracer):
+            yield msg
+    except Exception as e:
+        tracer.emit(
+            TraceEvent(
+                kind=TraceKind.RUN_ERROR,
+                payload={
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                },
+            )
+        )
+        raise
 
 
 async def submit(
@@ -175,10 +203,11 @@ async def submit(
         max_turns=config.max_turns,
         can_use_tool=config.can_use_tool,
         tool_execution_mode=config.tool_execution_mode,
+        transcript_path=config.transcript_path,
     )
 
     last_stop_reason: str | None = None
-    async for msg in query_loop(agent_state, params, tracer):   # ★ agent_state 传入
+    async for msg in _traced_query_loop(agent_state, params, tracer):   # ★ 错误兜底在 helper 里
         if isinstance(msg, AssistantMessage):
             # query_loop 内 state.messages.extend 已把整轮 AssistantMessage 累积进
             # agent_state.messages(同 list 引用);此处不重复 append,仅落盘 + 统计。
@@ -193,12 +222,40 @@ async def submit(
         elif isinstance(msg, StreamEvent):
             # 流式 token 事件; 本期无 UI 暂不处理, 留位置供未来实时显示/hook
             continue
+        elif isinstance(msg, Terminal):
+            # 异常终止信号:query_loop 只对非 COMPLETED 的终止 yield Terminal
+            # (MAX_TURNS / MODEL_ERROR / PROMPT_TOO_LONG 等)。这里按 reason 出专属
+            # error subtype 并 return,绕过下方"最后一条恰好是 tool_result 就假成功、
+            # text 为空"的兜底判定。对齐 CC QueryEngine.ts:is_error + error_max_turns,
+            # text 取最后一条 assistant(可能为空,但 subtype 已明确是 error)。
+            subtype = {
+                TerminalReason.MAX_TURNS: "error_max_turns",
+                TerminalReason.MODEL_ERROR: "error_model",
+                TerminalReason.PROMPT_TOO_LONG: "error_prompt_too_long",
+                TerminalReason.BUDGET_EXCEEDED: "error_budget",
+            }.get(msg.reason, "error_during_execution")
+            yield {
+                "type": "result",
+                "subtype": subtype,
+                "is_error": True,
+                "error": msg.error or f"terminated: {msg.reason.value}",
+                "text": _extract_text(_last_message(agent_state.messages, ("assistant",))),
+                "usage": {
+                    "input_tokens": agent_state.total_input_tokens,
+                    "output_tokens": agent_state.total_output_tokens,
+                },
+            }
+            return
 
         if config.max_budget_usd is not None and _rough_cost(
             agent_state.total_input_tokens, agent_state.total_output_tokens
         ) >= config.max_budget_usd:
             yield {"type": "result", "subtype": "error_budget", "error": "budget exceeded"}
             return
+
+    # 后台维护会话笔记(session memory):submit 末尾是自然断点(末条为完成态 assistant),
+    # 满足阈值则 fire-and-forget 起一次隔离 fork 改笔记。默认关(env)、不阻塞返回、失败不影响主流程。
+    maybe_extract_session_memory(agent_state, params, tracer)
 
     result = _last_message(agent_state.messages, ("assistant", "user"))
     if not is_result_successful(result, last_stop_reason):

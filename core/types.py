@@ -7,47 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, Field
 
 from core.file_state import FileStateCache
-
-
-# ── 文件读状态 ────────────────────────────────────────
-# (从 core/builtin_tools/readstate.py 移入:types 反向依赖 builtin_tools 会触发
-#  types → builtin_tools/__init__ → tools → types 循环 import;和 SkillMeta 一样自含。)
-@dataclass
-class ReadRecord:
-    content: str
-    mtime: float
-    offset: int
-    limit: int | None
-
-
-class FileReadState:
-    """agent 级文件读状态: read 记录 mtime, write 查陈旧。跨轮持久(不随 ToolContext 重建)。"""
-
-    def __init__(self) -> None:
-        self._records: dict[str, ReadRecord] = {}
-
-    def set(self, path: str, content: str, mtime: float,
-            offset: int, limit: int | None) -> None:
-        self._records[path] = ReadRecord(content, mtime, offset, limit)
-
-    def get(self, path: str) -> ReadRecord | None:
-        return self._records.get(path)
-
-    def is_unchanged(self, path: str, offset: int,
-                     limit: int | None, disk_mtime: float) -> bool:
-        """read 去重: 同 (path, offset, limit) 且 mtime 未变 → True。"""
-        rec = self._records.get(path)
-        return (rec is not None and rec.offset == offset
-                and rec.limit == limit and rec.mtime == disk_mtime)
-
-    def is_stale(self, path: str, disk_mtime: float) -> bool:
-        """write 陈旧: 读过且读后被外部改了(disk mtime > 记录) → True。没读过 → False。"""
-        rec = self._records.get(path)
-        return rec is not None and disk_mtime > rec.mtime
 
 
 # ── 消息块 ──────────────────────────────────────────
@@ -83,6 +47,9 @@ class Usage(BaseModel):
 class UserMessage(BaseModel):
     role: Literal["user"] = "user"
     content: list[ContentBlock] | str
+    # 内部稳定锚点(对齐 CC message.uuid):用于 session-memory lastSummarizedMessageId
+    # 与 compact 边界切割。发送给 provider 时不依赖此字段。
+    uuid: str = Field(default_factory=lambda: str(uuid4()))
 
 
 class AssistantMessage(BaseModel):
@@ -91,9 +58,32 @@ class AssistantMessage(BaseModel):
     model: str | None = None
     stop_reason: str | None = None
     usage: Usage | None = None
+    # 本轮组装完成的墙钟时间(epoch 秒),供时间式 microcompact 算"距上条 assistant 的空闲"。
+    # 可选、默认 None:老消息/恢复链构造的 assistant 无此值时,时间式跳过(算不出 gap)。
+    # 仅内部使用,不进 API 请求(to_anthropic 只取 content)。
+    created_at: float | None = None
+    # 内部稳定锚点(对齐 CC message.uuid)。
+    uuid: str = Field(default_factory=lambda: str(uuid4()))
 
 
-Message = UserMessage | AssistantMessage
+class CompactBoundaryMessage(BaseModel):
+    """内部 compact 边界标记。
+
+    作用:标记"边界之前的历史已被摘要替换";provider 适配器必须过滤它,不作为
+    Anthropic/OpenAI messages 发送。保留在 transcript / agent_state.messages 中,便于
+    后续 compact 的 floor 计算和调试。
+    """
+
+    role: Literal["system"] = "system"
+    subtype: Literal["compact_boundary"] = "compact_boundary"
+    content: str = "Conversation compacted"
+    trigger: Literal["auto", "manual"] = "auto"
+    pre_tokens: int = 0
+    last_pre_compact_message_uuid: str | None = None
+    uuid: str = Field(default_factory=lambda: str(uuid4()))
+
+
+Message = UserMessage | AssistantMessage | CompactBoundaryMessage
 
 
 # ── 统一流式事件(取自 Anthropic SSE 模型,最细粒度) ──
@@ -175,18 +165,31 @@ class QueryState(BaseModel):
     故 orchestrator 用 QueryState.model_construct(messages=...) 跳过校验以保引用。
     (ConfigDict(copy_on_model_validation="none") 在 v2 原生已移除,仅 v1 兼容层支持。)
     """
-    # FileStateCache 是内部状态容器(非 BaseModel、不参与校验/序列化),
-    # 告知 pydantic 放过它的 schema 生成。
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     messages: list[Message]
     turn_count: int = 1
     max_output_tokens_recovery_count: int = 0
     max_output_tokens_override: int | None = None
-    has_attempted_autocompact: bool = False
+    has_attempted_reactive_compact: bool = False
+    autocompact_consecutive_failures: int = 0
     network_retry_count: int = 0
     transition: Continue | Terminal | None = None
-    read_file_state: FileStateCache  = field(default_factory=FileStateCache)
+
+
+@dataclass
+class SessionMemoryState:
+    """
+    initialized:上下文是否达到过初始化阈值;tokens_at_last_extraction:上次提取时的上下文 token 数
+    (算增长量);in_progress:是否有一次后台提取在飞(防并发重复起、供压缩侧等待)。
+    """
+    initialized: bool = False
+    tokens_at_last_extraction: int = 0
+    in_progress: bool = False
+    # session-memory.md 已覆盖到的消息 uuid。
+    last_summarized_message_uuid: str | None = None
+    # 上次触发 memory extraction 的消息 uuid,用于统计"自上次更新以来的工具调用数"
+    last_memory_message_uuid: str | None = None
+    # compact 会推进 generation；较早代次启动的后台 extraction 不得回写过期边界元数据。
+    generation: int = 0
 
 
 @dataclass
@@ -198,10 +201,21 @@ class AgentState:
     """
     messages: list[Message] = field(default_factory=list)
     skills: list[SkillMeta] = field(default_factory=list)
-    file_read_state: FileReadState = field(default_factory=FileReadState)
+    # 已通告过的 skill 名(对齐 CC sentSkillNames):skill 目录只作为一条 user 消息
+    # 注入历史一次,之后靠此集合去重、不再重发 —— 保持前缀稳定、便于缓存命中。
+    sent_skill_names: set[str] = field(default_factory=set)
+    # Read/Edit/Write 共用的乐观锁缓存。放在 agent 级,确保跨 submit 持久。
+    file_read_state: FileStateCache = field(default_factory=FileStateCache)
     cwd: str = ""
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    # microcompact 缓存感知式(计数式)状态。
+    # 仅当 provider 支持 cache-editing 时才被写入/使用;否则恒为空 → 零影响。
+    mc_registered: set[str] = field(default_factory=set)   # 已注册的 compactable tool_use_id(去重)
+    mc_tool_order: list[str] = field(default_factory=list)  # 注册顺序(算 active 与最旧优先)
+    mc_deleted: set[str] = field(default_factory=set)       # 已通过 cache_edits 通知服务端删除的 id
+    # session memory(笔记维护)会话级状态
+    sm: SessionMemoryState = field(default_factory=SessionMemoryState)
 
 
 # ── 常量(对齐真实项目 query.ts) ──

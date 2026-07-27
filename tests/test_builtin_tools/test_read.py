@@ -2,7 +2,7 @@
 import asyncio
 import os
 
-from core.builtin_tools.read import ReadIn, READ_TOOL
+from core.builtin_tools.read import ReadInput, READ_TOOL
 from core.tools import ToolContext
 from core.types import AgentState
 from telemetry.tracer import NoopTracer
@@ -16,7 +16,7 @@ async def test_read_adds_line_numbers(tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("line1\nline2\nline3\n")
     agent_state = AgentState(cwd=str(tmp_path))
-    result = await READ_TOOL.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    result = await READ_TOOL.func(ReadInput(file_path=str(f)), _ctx(agent_state))
     assert isinstance(result, str)
     assert "1" in result and "line1" in result
     assert "2" in result and "line2" in result
@@ -27,7 +27,7 @@ async def test_read_offset_limit(tmp_path):
     f.write_text("l1\nl2\nl3\nl4\nl5\n")
     agent_state = AgentState(cwd=str(tmp_path))
     result = await READ_TOOL.func(
-        ReadIn(file_path=str(f), offset=2, limit=2), _ctx(agent_state))
+        ReadInput(file_path=str(f), offset=2, limit=2), _ctx(agent_state))
     assert isinstance(result, str)
     assert "l2" in result and "l3" in result
     assert "l1" not in result and "l4" not in result
@@ -40,8 +40,8 @@ async def test_read_dedup_unchanged(tmp_path):
     agent_state = AgentState(cwd=str(tmp_path))
     ctx = _ctx(agent_state)
     tool = READ_TOOL
-    await tool.func(ReadIn(file_path=str(f)), ctx)   # 首次读, 记录
-    result = await tool.func(ReadIn(file_path=str(f)), ctx)  # 同 range, mtime 未变
+    await tool.func(ReadInput(file_path=str(f)), ctx)
+    result = await tool.func(ReadInput(file_path=str(f)), ctx)
     assert isinstance(result, str)
     assert "未改动" in result
 
@@ -52,19 +52,19 @@ async def test_read_after_external_change_re_reads(tmp_path):
     agent_state = AgentState(cwd=str(tmp_path))
     tool = READ_TOOL
     ctx = _ctx(agent_state)
-    await tool.func(ReadIn(file_path=str(f)), ctx)
+    await tool.func(ReadInput(file_path=str(f)), ctx)
     os.utime(str(f), (os.path.getmtime(str(f)) + 100, os.path.getmtime(str(f)) + 100))
-    result = await tool.func(ReadIn(file_path=str(f)), ctx)
+    result = await tool.func(ReadInput(file_path=str(f)), ctx)
     assert isinstance(result, str)
     assert "未改动" not in result
     assert "hello" in result
 
 
-async def test_read_binary_decodes_with_replacement(tmp_path):
+async def test_read_non_utf8_uses_replacement_decoding(tmp_path):
     f = tmp_path / "a.png"
     f.write_bytes(b"\x89PNG\r\n")
     agent_state = AgentState(cwd=str(tmp_path))
-    result = await READ_TOOL.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    result = await READ_TOOL.func(ReadInput(file_path=str(f)), _ctx(agent_state))
     assert isinstance(result, str)
     assert "PNG" in result
 
@@ -73,9 +73,9 @@ async def test_read_empty_file(tmp_path):
     f = tmp_path / "empty.txt"
     f.write_text("")
     agent_state = AgentState(cwd=str(tmp_path))
-    result = await READ_TOOL.func(ReadIn(file_path=str(f)), _ctx(agent_state))
+    result = await READ_TOOL.func(ReadInput(file_path=str(f)), _ctx(agent_state))
     assert isinstance(result, str)
-    assert "1→" in result
+    assert result == "(空文件)"
 
 
 async def test_read_offset_out_of_range(tmp_path):
@@ -83,7 +83,7 @@ async def test_read_offset_out_of_range(tmp_path):
     f.write_text("only one line\n")
     agent_state = AgentState(cwd=str(tmp_path))
     result = await READ_TOOL.func(
-        ReadIn(file_path=str(f), offset=99), _ctx(agent_state))
+        ReadInput(file_path=str(f), offset=99), _ctx(agent_state))
     assert isinstance(result, str)
     assert result == "(空文件)"
 
@@ -93,7 +93,7 @@ async def test_read_nonexistent_raises(tmp_path):
     import pytest
     with pytest.raises(Exception):
         await READ_TOOL.func(
-            ReadIn(file_path=str(tmp_path / "nope.txt")), _ctx(agent_state))
+            ReadInput(file_path=str(tmp_path / "nope.txt")), _ctx(agent_state))
 
 
 async def test_read_out_of_range_then_external_change_blocks_write(tmp_path):
@@ -106,18 +106,18 @@ async def test_read_out_of_range_then_external_change_blocks_write(tmp_path):
     """
     import os
     import pytest
-    from core.builtin_tools.write import WriteIn, WRITE_TOOL
+    from core.builtin_tools.write import WriteInput, WRITE_TOOL
 
     f = tmp_path / "a.txt"
     f.write_text("only one line\n")
     agent_state = AgentState(cwd=str(tmp_path))
     # 越界 read: 拿 warning, 但应记 read_state
     await READ_TOOL.func(
-        ReadIn(file_path=str(f), offset=99), _ctx(agent_state))
+        ReadInput(file_path=str(f), offset=99), _ctx(agent_state))
     # 外部改文件(mtime 推后)
     future = os.path.getmtime(str(f)) + 1000
     os.utime(str(f), (future, future))
     # write 应被拒(陈旧检测生效)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="重新 Read"):
         await WRITE_TOOL.func(
-            WriteIn(file_path=str(f), content="x\n"), _ctx(agent_state))
+            WriteInput(file_path=str(f), content="x\n"), _ctx(agent_state))

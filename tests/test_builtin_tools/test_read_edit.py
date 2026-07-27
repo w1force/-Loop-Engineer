@@ -16,7 +16,7 @@ from core.file_state import FileStateCache, file_mtime_ms
 from core.registry import get_all_base_tools
 from core.tool_executor import make_executor
 from core.tools import ToolContext, default_can_use_tool
-from core.types import ToolResultBlock, ToolUseBlock
+from core.types import AgentState, ToolResultBlock, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -24,7 +24,7 @@ def _ctx(cache: FileStateCache | None = None) -> ToolContext:
     return ToolContext(
         tracer=NoopTracer(),
         abort_signal=asyncio.Event(),
-        read_file_state=cache or FileStateCache(),
+        agent_state=AgentState(file_read_state=cache or FileStateCache()),
     )
 
 
@@ -48,7 +48,7 @@ async def test_read_returns_numbered_lines_and_locks(tmp_path):
     out = await _read_func(ReadInput(file_path=str(f)), ctx)
     assert "1→line1" in out and "2→line2" in out
     # 读后已上锁:记录了该文件的 FileState
-    assert ctx.read_file_state.get(str(f)) is not None
+    assert ctx.agent_state.file_read_state.get(str(f)) is not None
 
 
 async def test_read_offset_limit(tmp_path):
@@ -81,6 +81,31 @@ async def test_edit_after_read_succeeds(tmp_path):
     )
     assert "已编辑" in msg
     assert "return 2" in f.read_text(encoding="utf-8")
+
+
+async def test_read_edit_lock_persists_across_tool_contexts(tmp_path):
+    """同一 AgentState 的新 ToolContext 仍能看到上一次 Read 的锁。"""
+    f = tmp_path / "cross-submit.py"
+    f.write_text("value = 1\n", encoding="utf-8")
+    agent_state = AgentState()
+    read_ctx = ToolContext(
+        tracer=NoopTracer(),
+        abort_signal=asyncio.Event(),
+        agent_state=agent_state,
+    )
+    edit_ctx = ToolContext(
+        tracer=NoopTracer(),
+        abort_signal=asyncio.Event(),
+        agent_state=agent_state,
+    )
+
+    await _read_func(ReadInput(file_path=str(f)), read_ctx)
+    await _edit_func(
+        EditInput(file_path=str(f), old_string="value = 1", new_string="value = 2"),
+        edit_ctx,
+    )
+
+    assert f.read_text(encoding="utf-8") == "value = 2\n"
 
 
 async def test_edit_replace_all(tmp_path):
@@ -180,11 +205,11 @@ async def test_read_edit_roundtrip_via_executor(tmp_path):
     cache = FileStateCache()
     ctx = _ctx(cache)
     ex = make_executor("batch", [READ_TOOL, EDIT_TOOL], default_can_use_tool, NoopTracer(), ctx)
-    # 先 Read(经统一入口,写入同一 read_file_state)
+    # 先 Read(经统一入口,写入 agent_state.file_read_state)
     ex.add_tool(ToolUseBlock(id="r1", name="Read", input={"file_path": str(f)}))
     r1 = await ex.get_results()
     assert not r1[0].is_error and "1→v = 10" in _content(r1[0])
-    # 再 Edit(乐观锁校验通过 —— 因为共享同一 ctx.read_file_state)
+    # 再 Edit(乐观锁校验通过 —— 因为共享同一 agent_state.file_read_state)
     ex2 = make_executor("batch", [READ_TOOL, EDIT_TOOL], default_can_use_tool, NoopTracer(), ctx)
     ex2.add_tool(
         ToolUseBlock(id="e1", name="Edit", input={"file_path": str(f), "old_string": "v = 10", "new_string": "v = 20"})

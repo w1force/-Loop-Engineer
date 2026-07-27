@@ -30,7 +30,11 @@ async def _deny(tc: ToolUseBlock):
 
 
 def _ctx() -> ToolContext:
-    return ToolContext(tracer=NoopTracer(), abort_signal=asyncio.Event(), agent_state=AgentState())
+    return ToolContext(
+        tracer=NoopTracer(),
+        abort_signal=asyncio.Event(),
+        agent_state=AgentState(),
+    )
 
 
 def _new_executor(tools=None, can_use_tool=default_can_use_tool):

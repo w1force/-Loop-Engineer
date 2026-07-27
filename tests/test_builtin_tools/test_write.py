@@ -12,7 +12,7 @@ from core.file_state import FileStateCache
 from core.registry import get_all_base_tools
 from core.tool_executor import make_executor
 from core.tools import ToolContext, default_can_use_tool
-from core.types import ToolUseBlock
+from core.types import AgentState, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -20,7 +20,7 @@ def _ctx(cache: FileStateCache | None = None) -> ToolContext:
     return ToolContext(
         tracer=NoopTracer(),
         abort_signal=asyncio.Event(),
-        read_file_state=cache or FileStateCache(),
+        agent_state=AgentState(file_read_state=cache or FileStateCache()),
     )
 
 
@@ -41,7 +41,7 @@ async def test_write_new_file_without_read(tmp_path):
     assert "创建" in msg
     assert f.read_text(encoding="utf-8") == "x = 1\n"
     # 写后已上锁:后续可直接再覆盖(无需重读)
-    assert ctx.read_file_state.get(str(f)) is not None
+    assert ctx.agent_state.file_read_state.get(str(f)) is not None
 
 
 async def test_write_creates_parent_dirs(tmp_path):

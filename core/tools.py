@@ -19,8 +19,8 @@ from telemetry.tracer import Tracer
 from .types import TextBlock, ToolUseBlock
 
 if TYPE_CHECKING:
-    from .types import AgentState, QueryState
     from .file_state import FileStateCache
+    from .types import AgentState, QueryState
 
 
 def _not_impl(feature: str, phase: str) -> Never:
@@ -32,9 +32,7 @@ def _not_impl(feature: str, phase: str) -> Never:
 class ToolContext:
     """工具执行时注入的运行时上下文。
 
-    双 state:
-    - agent_state: 跨 submit 的 agent 会话状态(工具取 file_read_state/skills/cwd)
-    - query_state: 单次 query_loop 内的循环状态(原 state 改名)
+    agent_state 是跨 submit 的会话状态,工具从中读取 file_read_state/skills/cwd。
     """
 
     tracer: Tracer
@@ -50,16 +48,17 @@ class ToolContext:
             from .types import AgentState
 
             self.agent_state = AgentState()
+
+        if self.read_file_state is not None:
+            self.agent_state.file_read_state = self.read_file_state
         if self.query_state is None:
-            from .file_state import FileStateCache
             from .types import QueryState
 
-            cache = self.read_file_state or FileStateCache()
             self.query_state = QueryState.model_construct(
-                messages=[], read_file_state=cache
-            )
+                messages=[])
         if self.read_file_state is None and self.query_state is not None:
-            self.read_file_state = self.query_state.read_file_state
+            self.read_file_state = self.agent_state.file_read_state 
+
 
 
 class CanUseDecision(BaseModel):

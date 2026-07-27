@@ -53,7 +53,7 @@ async def read(
         )
 
     content = read_text_lf(path)          # 归一化为 \n
-    all_lines = content.split("\n")
+    all_lines = [] if content == "" else content.split("\n")
     # 归一化起始行:全读时 offset 记为 1(而非 None),使 Read 记录的 offset 恒非 None,
     # 从而与 Edit/Write 写入的 offset=None 区分开 —— 去重缓存据此只认"上次 Read"的记录。
     eff_offset = offset if offset is not None else 1
@@ -92,7 +92,7 @@ async def _read_func(inp: ReadInput, ctx: ToolContext) -> str:
     # ── 去重缓存:同一文件 + 同样读取范围 + 自上次 Read 后 mtime 未变 → 不重发全文(省上下文) ──
     # 只对"上次 Read"留下的记录去重(prev.offset 非 None);Edit/Write 记录 offset=None,
     # 其内容模型并未以 Read 结果见过,故不对其去重。
-    read_file_state = ctx.query_state.read_file_state
+    read_file_state = ctx.agent_state.file_read_state
     eff_offset = inp.offset if inp.offset is not None else 1
     prev = read_file_state.get(path)
     if (
