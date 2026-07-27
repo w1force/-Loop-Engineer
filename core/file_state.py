@@ -89,3 +89,10 @@ class FileStateCache:
 
     def delete(self, key: str) -> None:
         self._cache.pop(self._norm(key), None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def items(self) -> list[tuple[str, FileState]]:
+        """按 LRU 顺序返回快照:最久未使用在前,最近使用在后。"""
+        return list(self._cache.items())

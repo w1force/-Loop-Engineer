@@ -24,13 +24,13 @@ from core.registry import get_tools
 
 from .loop.orchestrator import QueryParams, query_loop
 from .provider import Provider
+from .session_memory import maybe_extract_session_memory
 from .skills.loader import SkillLoader
 from .tools import Tool, default_can_use_tool
 from .transcript import record_transcript
 from .types import (
     AgentState,
     AssistantMessage,
-    FileReadState,
     Message,
     StreamEvent,
     Terminal,
@@ -64,7 +64,7 @@ class AgentConfig:
 
 
 def build_agent_state(config: AgentConfig) -> AgentState:
-    """调用者初始化 agent_state:scan skills(异常降级)+ 新建 FileReadState + 设 cwd
+    """调用者初始化 agent_state:scan skills(异常降级)+ 新建文件状态缓存 + 设 cwd
     + 迁移 initial_messages(解决 Task 2 initial_messages 死字段 concern)。"""
     try:
         skills = SkillLoader.scan(config.skill_dirs)
@@ -74,7 +74,6 @@ def build_agent_state(config: AgentConfig) -> AgentState:
     return AgentState(
         messages=[*config.initial_messages],
         skills=skills,
-        file_read_state=FileReadState(),
         cwd=config.cwd,
     )
 
@@ -181,6 +180,7 @@ async def submit(
         max_turns=config.max_turns,
         can_use_tool=config.can_use_tool,
         tool_execution_mode=config.tool_execution_mode,
+        transcript_path=config.transcript_path,
     )
 
     last_stop_reason: str | None = None
@@ -229,6 +229,10 @@ async def submit(
         ) >= config.max_budget_usd:
             yield {"type": "result", "subtype": "error_budget", "error": "budget exceeded"}
             return
+
+    # 后台维护会话笔记(session memory):submit 末尾是自然断点(末条为完成态 assistant),
+    # 满足阈值则 fire-and-forget 起一次隔离 fork 改笔记。默认关(env)、不阻塞返回、失败不影响主流程。
+    maybe_extract_session_memory(agent_state, params, tracer)
 
     result = _last_message(agent_state.messages, ("assistant", "user"))
     if not is_result_successful(result, last_stop_reason):

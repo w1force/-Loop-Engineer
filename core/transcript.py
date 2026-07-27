@@ -7,7 +7,7 @@ import json
 
 import aiofiles
 
-from .types import AssistantMessage, Message, UserMessage
+from .types import AssistantMessage, CompactBoundaryMessage, Message, UserMessage
 
 
 async def record_transcript(messages: list[Message], path) -> None:
@@ -28,6 +28,8 @@ def load_transcript(path) -> list[Message]:
             obj = json.loads(line)
             if obj.get("role") == "user":
                 out.append(UserMessage.model_validate(obj))
-            else:
+            elif obj.get("role") == "assistant":
                 out.append(AssistantMessage.model_validate(obj))
+            elif obj.get("role") == "system" and obj.get("subtype") == "compact_boundary":
+                out.append(CompactBoundaryMessage.model_validate(obj))
     return out

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel
 
+from core.file_state import FileStateCache
 from core.tools import CanUseDecision, Tool, ToolContext, _not_impl, default_can_use_tool
 from core.types import AgentState, ToolUseBlock
 from telemetry.tracer import NoopTracer
@@ -38,13 +39,12 @@ def test_tool_defaults_is_concurrency_safe_false_and_no_pre_execute():
 
 
 def test_tool_context_carries_fields():
-    # Task 2: agent_state 必需;query_state 默认 None
     ctx = ToolContext(
         tracer=NoopTracer(),
         abort_signal=asyncio.Event(),
         agent_state=AgentState(),
     )
-    assert ctx.query_state is None
+    assert isinstance(ctx.agent_state.file_read_state, FileStateCache)
 
 
 def test_not_impl_raises_with_clear_message():

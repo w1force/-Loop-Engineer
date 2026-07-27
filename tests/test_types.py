@@ -5,6 +5,7 @@ from core.types import (
     MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
     ESCALATED_MAX_TOKENS,
     AssistantMessage,
+    CompactBoundaryMessage,
     Continue,
     ContinueReason,
     QueryState,
@@ -33,6 +34,7 @@ def test_blocks_and_usage_construct():
 def test_messages_str_and_list_content():
     user_str = UserMessage(content="你好")
     assert user_str.content == "你好" and user_str.role == "user"
+    assert user_str.uuid
     user_list = UserMessage(content=[ToolResultBlock(tool_use_id="c1", content="ok")])
     assert user_list.content[0].type == "tool_result"
     asst = AssistantMessage(
@@ -41,6 +43,9 @@ def test_messages_str_and_list_content():
         stop_reason="end_turn",
     )
     assert asst.role == "assistant" and len(asst.content) == 2
+    assert asst.uuid and asst.uuid != user_str.uuid
+    boundary = CompactBoundaryMessage(pre_tokens=123, last_pre_compact_message_uuid=asst.uuid)
+    assert boundary.role == "system" and boundary.subtype == "compact_boundary"
 
 
 def test_state_transition_and_roundtrip():

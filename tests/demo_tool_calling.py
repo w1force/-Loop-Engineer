@@ -24,14 +24,13 @@ import time
 
 from pydantic import BaseModel, Field
 
-from core.file_state import FileStateCache
 from core.tools import ToolContext, build_tool, default_can_use_tool
 from core.tool_executor import (
     BatchToolExecutor,
     StreamingToolExecutor,
     make_executor,
 )
-from core.types import AgentState, QueryState, ToolUseBlock
+from core.types import AgentState, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -104,25 +103,15 @@ LIKE_TOOL = build_tool(
 
 
 # ════════════════════════════════════════════════════════════════════
-#  辅助: 构造 ToolContext(注入 agent_state + query_state)
+#  辅助: 构造 ToolContext(注入 agent_state)
 # ════════════════════════════════════════════════════════════════════
 
 def make_demo_ctx() -> ToolContext:
-    """构造 Demo 用的 ToolContext。
-    
-    注意: ToolContext 现在需要 agent_state(跨 submit 持久)和
-    query_state(单次 loop 状态,含 read_file_state LRU 缓存)。
-    """
-    agent_state = AgentState()
-    query_state = QueryState(
-        messages=[],
-        read_file_state=FileStateCache(),
-    )
+    """构造 Demo 用的 ToolContext。"""
     return ToolContext(
         tracer=NoopTracer(),
         abort_signal=asyncio.Event(),
-        agent_state=agent_state,
-        query_state=query_state,
+        agent_state=AgentState(),
     )
 
 

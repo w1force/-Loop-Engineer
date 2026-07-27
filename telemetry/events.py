@@ -25,6 +25,8 @@ class TraceKind(str, Enum):
     TOOL_EXEC_END = "tool_exec_end"
     # ── 恢复 ──
     RECOVERY_ATTEMPT = "recovery_attempt"  # 命中某条 TransitionRule
+    COMPACT_START = "compact_start"
+    COMPACT_END = "compact_end"
     # ── provider ──
     PROVIDER_REQUEST = "provider_request"
     PROVIDER_ERROR = "provider_error"

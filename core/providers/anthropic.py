@@ -10,6 +10,7 @@ import logging
 import sys
 import time
 from collections.abc import AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 
@@ -41,10 +42,14 @@ _CONTENT_EVENT_TYPES = {
 }
 
 
-def to_anthropic(messages: list[Message]) -> list[dict]:
+def to_anthropic(messages: list[Message], cache_ref_ids: set[str] | None = None) -> list[dict]:
     """内部 Message → Anthropic messages。
 
     内部 content block 模型本就照 Anthropic 建,直接 model_dump 即可对齐。
+
+    cache_ref_ids(仅缓存感知式 microcompact 启用时非空):给命中的 tool_result 块加
+    cache_reference 标记,供服务端按引用匹配缓存 + 应用 cache_edits 删除。
+    默认 None → 与原逻辑逐字节一致(不加任何字段)。
     """
     out: list[dict] = []
     for m in messages:
@@ -53,9 +58,22 @@ def to_anthropic(messages: list[Message]) -> list[dict]:
             if isinstance(content, str):
                 out.append({"role": "user", "content": content})
             else:
-                out.append({"role": "user", "content": [b.model_dump() for b in content]})
+                blocks: list[dict] = []
+                for b in content:
+                    d = b.model_dump()
+                    if (
+                        cache_ref_ids
+                        and d.get("type") == "tool_result"
+                        and d.get("tool_use_id") in cache_ref_ids
+                    ):
+                        d["cache_reference"] = d["tool_use_id"]
+                    blocks.append(d)
+                out.append({"role": "user", "content": blocks})
         else:  # assistant
-            out.append({"role": "assistant", "content": [b.model_dump() for b in m.content]})
+            # CompactBoundaryMessage(role=="system") 是 LE 内部边界标记,不进入
+            # Anthropic messages 数组(对齐 CC normalizeMessagesForAPI 过滤 system compact_boundary)。
+            if m.role == "assistant":
+                out.append({"role": "assistant", "content": [b.model_dump() for b in m.content]})
     return out
 
 
@@ -64,14 +82,46 @@ def to_anthropic_tools(tools: list) -> list[ToolDef]:
 
 
 class AnthropicAdapter(BaseAdapter, Provider):
-    def __init__(self, api_key: str, base_url: str = "https://api.anthropic.com" , debug_sse: bool = False):
+    # microcompact 时间式的接口门控标记:标识这是 Anthropic message 接口。
+    # compact 用鸭子类型读它(getattr(provider, "api_kind", "")),避免反向 import。
+    api_kind: str = "anthropic-messages"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.anthropic.com",
+        debug_sse: bool = False,
+        enable_cache_editing: bool = False,
+    ):
         headers = {
             "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
         super().__init__(base_url=base_url.rstrip("/"), headers=headers)
+        self._base_url = base_url.rstrip("/")  # 供 is_first_party_anthropic 判定主机
         self._debug_sse = debug_sse  # True 时打印原始 SSE 流(观察流式节奏)
+        # 缓存感知式 microcompact 的操作员总开关(对齐 CC 的 CLAUDE_CACHED_MICROCOMPACT 显式 opt-in)。
+        # 默认关。即便开了,也必须 base_url 是真 api.anthropic.com 才生效(见 supports_cache_editing)。
+        self.enable_cache_editing = enable_cache_editing
+
+    @property
+    def is_first_party_anthropic(self) -> bool:
+        """base_url 主机是否真为 api.anthropic.com(对齐 CC isFirstPartyAnthropicBaseUrl)。
+
+        指向 DeepSeek / 智谱 等 anthropic 兼容端点时主机不同 → False → 绝不发 cache_edits。
+        这是"只有确认在跟真 api.anthropic.com 说话才开"的核心闸门。
+        """
+        try:
+            return urlparse(self._base_url).hostname == "api.anthropic.com"
+        except Exception:
+            return False
+
+    @property
+    def supports_cache_editing(self) -> bool:
+        # 对齐 CC:显式 opt-in(enable_cache_editing)+ 真 api.anthropic.com base_url。
+        # 模型是否 claude-4.x 由调用侧(microcompact)另查——模型是 per-request、不在适配器上。
+        return self.enable_cache_editing and self.is_first_party_anthropic
 
     async def stream(
         self,
@@ -85,14 +135,25 @@ class AnthropicAdapter(BaseAdapter, Provider):
         tracer: Tracer,
         **opts,
     ) -> AsyncIterator[StreamEvent]:
+        # 缓存感知式 microcompact:仅当本适配器启用 cache-editing 时,读取要删的 tool_use_id
+        # (由 stream_turn 从 agent_state.mc_deleted 透传)。默认关 → cache_edits 恒为 None →
+        # to_anthropic 不加 cache_reference、req_body 不加 cache_edits → 与原逻辑逐字节一致。
+        cache_edits = opts.get("cache_edits") if self.enable_cache_editing else None
+        cache_ref_ids = set(cache_edits) if cache_edits else None
         req_body = {
             "model": model,
-            "messages": to_anthropic(messages),
+            "messages": to_anthropic(messages, cache_ref_ids),
             "system": system,
             "tools": to_anthropic_tools(tools),
             "max_tokens": max_tokens,
             "stream": True,
         }
+        if cache_edits:
+            # 通知服务端删除这些 tool_use 的缓存结果(不改本地内容 → 保住热缓存前缀)。
+            req_body["cache_edits"] = {
+                "type": "cache_edits",
+                "edits": [{"type": "delete", "tool_use_id": i} for i in cache_edits],
+            }
         # ★ 发请求前埋点(P2 §3.4);req_body 进 payload,run.jsonl 可查完整请求。
         # LLM 完整响应(聚合 + LLM_RESPONSE 落盘)由 aggregate_stream 做 —— 它是 provider
         # 无关的统一收口,所有 provider 的 stream 都经此,不必每个 provider 各写一份聚合。

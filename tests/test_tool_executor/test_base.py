@@ -9,8 +9,7 @@ from pydantic import BaseModel
 
 from core.tools import CanUseDecision, Tool, ToolContext, default_can_use_tool
 from core.tool_executor.base import ToolExecutor, _to_result
-from core.file_state import FileStateCache
-from core.types import AgentState, QueryState, TextBlock, ToolResultBlock, ToolUseBlock
+from core.types import AgentState, TextBlock, ToolResultBlock, ToolUseBlock
 from telemetry.tracer import NoopTracer
 
 
@@ -35,7 +34,6 @@ def _ctx() -> ToolContext:
         tracer=NoopTracer(),
         abort_signal=asyncio.Event(),
         agent_state=AgentState(),
-        query_state=QueryState(messages=[], read_file_state=FileStateCache()),
     )
 
 

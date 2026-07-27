@@ -7,6 +7,7 @@ usage/stop_reason 仍在内部暂存供埋点用,整轮组装由 stream_turn 负
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -194,6 +195,12 @@ async def stream_turn(
     因 QueryState(messages=agent_state.messages) 引用同一 list)。
     """
     max_tokens = state.max_output_tokens_override or params.max_tokens
+    # 缓存感知式 microcompact:有已删 id 时把它作为 cache_edits 透传给 provider。
+    # 用 **extra 条件传参:mc_deleted 为空(默认,provider 不支持 cache-editing 时恒空)→
+    # 不传该 kwarg → provider.stream 调用与原来完全一致(不依赖 provider 是否接受该参数)。
+    extra: dict = {}
+    if getattr(agent_state, "mc_deleted", None):
+        extra["cache_edits"] = list(agent_state.mc_deleted)
     events = params.provider.stream(
         messages=state.messages,
         system=params.system,
@@ -202,6 +209,7 @@ async def stream_turn(
         max_tokens=max_tokens,
         abort_signal=params.abort_signal,
         tracer=tracer,
+        **extra,
     )
     all_blocks: list[TextBlock | ToolUseBlock] = []
     tool_calls: list[ToolUseBlock] = []
@@ -231,7 +239,9 @@ async def stream_turn(
     if stop_reason == "max_tokens":
         withheld = "max_output_tokens"
 
-    full = AssistantMessage(content=all_blocks, usage=usage, stop_reason=stop_reason)
+    full = AssistantMessage(
+        content=all_blocks, usage=usage, stop_reason=stop_reason, created_at=time.time()
+    )  # created_at:供时间式 microcompact 算"距上条 assistant 的空闲时长"
     yield StreamOutcome(                                  # ★ 末尾 yield 元数据(替代 return)
         assistant_msgs=[full],
         tool_calls=tool_calls,
