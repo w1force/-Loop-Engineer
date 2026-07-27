@@ -34,13 +34,14 @@ async def test_read_offset_limit(tmp_path):
 
 
 async def test_read_dedup_unchanged(tmp_path):
-    """同一 agent_state(read_state 共享):首次读记录,二次同 range+mtime → unchanged。"""
+    """同一 ToolContext(read_file_state 共享):首次读记录,二次同 range+mtime → 未改动。"""
     f = tmp_path / "a.txt"
     f.write_text("hello\n")
     agent_state = AgentState(cwd=str(tmp_path))
+    ctx = _ctx(agent_state)
     tool = READ_TOOL
-    await tool.func(ReadInput(file_path=str(f)), _ctx(agent_state))   # 首次读, 记录
-    result = await tool.func(ReadInput(file_path=str(f)), _ctx(agent_state))  # 同 range, mtime 未变
+    await tool.func(ReadInput(file_path=str(f)), ctx)
+    result = await tool.func(ReadInput(file_path=str(f)), ctx)
     assert isinstance(result, str)
     assert "未改动" in result
 
@@ -50,9 +51,10 @@ async def test_read_after_external_change_re_reads(tmp_path):
     f.write_text("hello\n")
     agent_state = AgentState(cwd=str(tmp_path))
     tool = READ_TOOL
-    await tool.func(ReadInput(file_path=str(f)), _ctx(agent_state))
+    ctx = _ctx(agent_state)
+    await tool.func(ReadInput(file_path=str(f)), ctx)
     os.utime(str(f), (os.path.getmtime(str(f)) + 100, os.path.getmtime(str(f)) + 100))
-    result = await tool.func(ReadInput(file_path=str(f)), _ctx(agent_state))
+    result = await tool.func(ReadInput(file_path=str(f)), ctx)
     assert isinstance(result, str)
     assert "未改动" not in result
     assert "hello" in result
