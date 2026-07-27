@@ -14,6 +14,7 @@ from config import get_settings
 from core.agent_loop import AgentConfig, build_agent_state, submit
 from core.prompts import build_diagnose_system_prompt
 from core.providers.anthropic import AnthropicAdapter
+from core.session_memory import await_pending_extractions
 from core.tools import Tool
 from telemetry.file_tracer import FileTracer
 
@@ -64,8 +65,11 @@ async def demo_real_llm():
     )
     user_input = "帮我读 a、b、c 三个 key,然后把结果汇总写到 x"
     agent_state = build_agent_state(config)
-    async for result in submit(user_input, agent_state, config, tracer):
-        print(result)
+    try:
+        async for result in submit(user_input, agent_state, config, tracer):
+            print(result)
+    finally:
+        await await_pending_extractions()
 
 
 async def real_tool_demo():
@@ -84,8 +88,11 @@ async def real_tool_demo():
     )
     user_input = "审计一下我项目中关于工具调用的实现方式，然后在tests文件夹下面写一个demo版"
     astate = build_agent_state(config)
-    async for result in submit(user_input, astate, config, tracer):
-        print(result)
+    try:
+        async for result in submit(user_input, astate, config, tracer):
+            print(result)
+    finally:
+        await await_pending_extractions()
 
 
 def log_config():

@@ -267,7 +267,9 @@ async def test_prompt_too_long_terminal(monkeypatch):
     monkeypatch.setattr("core.loop.recovery.rules.asyncio.sleep", _no_sleep)
     provider = _ScriptedProvider([PromptTooLongError("too long", status=400)])
     spy = SpyTracer()
-    out = [m async for m in query_loop(_agent_state_hi(), _params_with(provider), spy)]
+    params = _params_with(provider)
+    params.enable_compact = False
+    out = [m async for m in query_loop(_agent_state_hi(), params, spy)]
     transitions = [e for e in spy.events if e.kind is TraceKind.TRANSITION]
     assert transitions[-1].payload["reason"] == "prompt_too_long"
 
@@ -480,4 +482,3 @@ async def test_withheld_to_recovery_no_duplicate_assistant(monkeypatch):
     # submit 收到 3 条 AssistantMessage yield(整轮透传:UI 可见所有片段)
     yielded = [m for m in out if isinstance(m, AssistantMessage)]
     assert len(yielded) == 3
-

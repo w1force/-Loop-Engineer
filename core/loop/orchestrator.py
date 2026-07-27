@@ -12,9 +12,8 @@ import logging
 from typing import Callable, Literal, cast
 
 from ..provider import Provider
-from ..provider_errors import ProviderError
+from ..provider_errors import PromptTooLongError, ProviderError
 from ..tool_executor import make_executor
-from ..file_state import FileStateCache
 from ..tools import Tool, ToolContext, default_can_use_tool
 from ..types import (
     AgentState,
@@ -51,6 +50,10 @@ class QueryParams:
     max_turns: int = 20
     can_use_tool: Callable = default_can_use_tool
     tool_execution_mode: Literal["streaming", "batch"] = "streaming"  # Task 7 新增
+    transcript_path: str | None = None
+    # 是否在每轮进循环前跑 microcompact(默认开)。forked agent 置 False:
+    # 关掉会就地改 tool_result 内容的时间式 microcompact,避免污染父共享的消息对象。
+    enable_compact: bool = True
 
 
 def _emit_transition(tracer: Tracer, transition) -> None:
@@ -67,31 +70,28 @@ async def query_loop(
 ) -> AsyncIterator[Message | StreamEvent | Tombstone]:
     """内层 agentic loop。stream_turn 流式 + tombstone 通知下游失败轮。
 
-    业务异常在 while 内 catch → chain.handle_error → State 变换;
-    失败/abort 时 yield Tombstone(turn_id) 通知下游丢弃本轮已收 StreamEvent。
-
-    agent_state.messages 是单一来源:QueryState.model_construct(messages=agent_state.messages)
-    引用同一 list(pydantic v2.13 默认 list 入参会 copy,model_construct 跳校验保引用;
-    曾考虑 ConfigDict(copy_on_model_validation="none") 替代,但该 key 仅存于
-    pydantic.v1 兼容层、v2 原生已移除,revalidate_instances 不控制初始 copy),
-    原地 extend/append 即累积到 agent_state.messages(跨 submit 持久)。
+    agent_state.messages 是唯一消息源;QueryState 仅保存单次 loop 的轮次和恢复状态。
     """
-    state = QueryState.model_construct(messages=agent_state.messages, turn_count=1, read_file_state=FileStateCache())  # ★ 引用同一 list
+    state = QueryState.model_construct(messages=agent_state.messages, turn_count=1)  # ★ 引用同一 list
     # skill 目录去重注入:有新 skill 时,作为一条 user 消息插到
     # 末尾 prompt 之前,进入稳定前缀被缓存;无新 skill 则 no-op。原地改 agent_state.messages,
     # 与 state.messages 共享引用,故对本轮 stream_turn 立即可见。
     inject_skill_listing(agent_state)
     chain = build_recovery_chain()
     turn_id = 0
-
     while True:
         turn_id += 1                                          # ★ 每次 stream_turn(含重试)递增
         tracer = tracer.child(turn=state.turn_count)   # ★ 重新绑定为带 turn 的子 tracer;同轮所有 emit(请求/工具/recovery/transition)自动带 turn,可按 turn join
         tracer.emit(TraceEvent(kind=TraceKind.TURN_START))
-        state = await maybe_compact(agent_state, state, params, tracer)
+        #区分forked agent
+        if params.enable_compact:
+            state = await maybe_compact(agent_state, state, params, tracer)
 
-        ctx = ToolContext(tracer=tracer, abort_signal=params.abort_signal,
-                          agent_state=agent_state, query_state=state)
+        ctx = ToolContext(
+            tracer=tracer,
+            abort_signal=params.abort_signal,
+            agent_state=agent_state,
+        )
         executor = make_executor(
             params.tool_execution_mode, params.tools, params.can_use_tool, tracer, ctx
         )
@@ -111,6 +111,26 @@ async def query_loop(
             assert outcome is not None
         except ProviderError as e:
             executor.discard()                                  # 清在途工具执行, 防泄漏
+            if (
+                isinstance(e, PromptTooLongError)
+                and params.enable_compact
+                and not state.has_attempted_reactive_compact
+            ):
+                from ..full_compact import full_compact
+
+                if await full_compact(agent_state, params, tracer, trigger="auto"):
+                    yield Tombstone(turn_id)
+                    state = state.model_copy(
+                        update={
+                            "has_attempted_reactive_compact": True,
+                            "transition": Continue(
+                                reason=ContinueReason.REACTIVE_COMPACT_RETRY
+                            ),
+                            "autocompact_consecutive_failures": 0,
+                        }
+                    )
+                    _emit_transition(tracer, state.transition)
+                    continue
             decision = await chain.handle_error(state, e, params, tracer)
             yield Tombstone(turn_id)                            # ★ 通知下游本轮作废
             _emit_transition(tracer, decision.transition)

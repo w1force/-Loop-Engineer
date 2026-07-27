@@ -1,45 +1,43 @@
-from core.types import FileReadState
+from core.file_state import FileState, FileStateCache
+
+
+def _state(content: str = "content", timestamp: int = 100) -> FileState:
+    return FileState(content=content, timestamp=timestamp, offset=1, limit=10)
 
 
 def test_set_get_roundtrip():
-    rs = FileReadState()
-    rs.set("/a", "content", 100.0, 1, 10)
-    rec = rs.get("/a")
-    assert rec is not None
-    assert rec.content == "content" and rec.mtime == 100.0
-    assert rec.offset == 1 and rec.limit == 10
+    cache = FileStateCache()
+    cache.set("/a", _state())
+
+    record = cache.get("/a")
+
+    assert record == _state()
 
 
-def test_is_unchanged_true_when_same_range_and_mtime():
-    rs = FileReadState()
-    rs.set("/a", "c", 100.0, 1, 10)
-    assert rs.is_unchanged("/a", 1, 10, 100.0) is True
+def test_paths_are_normalized(tmp_path):
+    cache = FileStateCache()
+    path = tmp_path / "a.txt"
+    cache.set(str(path), _state())
+
+    assert cache.get(str(tmp_path / "." / "a.txt")) == _state()
 
 
-def test_is_unchanged_false_when_mtime_changed():
-    rs = FileReadState()
-    rs.set("/a", "c", 100.0, 1, 10)
-    assert rs.is_unchanged("/a", 1, 10, 101.0) is False
+def test_lru_evicts_oldest_entry():
+    cache = FileStateCache(capacity=2)
+    cache.set("/a", _state("a"))
+    cache.set("/b", _state("b"))
+    cache.get("/a")
+    cache.set("/c", _state("c"))
+
+    assert cache.get("/a") is not None
+    assert cache.get("/b") is None
+    assert cache.get("/c") is not None
 
 
-def test_is_unchanged_false_when_no_record():
-    rs = FileReadState()
-    assert rs.is_unchanged("/a", 1, 10, 100.0) is False
+def test_delete_removes_entry():
+    cache = FileStateCache()
+    cache.set("/a", _state())
 
+    cache.delete("/a")
 
-def test_is_stale_true_when_modified_after_read():
-    rs = FileReadState()
-    rs.set("/a", "c", 100.0, 1, None)
-    assert rs.is_stale("/a", 101.0) is True
-
-
-def test_is_stale_false_when_not_modified():
-    rs = FileReadState()
-    rs.set("/a", "c", 100.0, 1, None)
-    assert rs.is_stale("/a", 100.0) is False
-
-
-def test_is_stale_false_when_never_read():
-    """没读过的文件允许直接写(CC 行为)。"""
-    rs = FileReadState()
-    assert rs.is_stale("/a", 100.0) is False
+    assert cache.get("/a") is None

@@ -1,7 +1,7 @@
 """Task 4: build_agent_state + build_system_prompt 测试。
 
 Task 4 退役 prepare_skills 后,skill 注入逻辑分两段:
-- build_agent_state(config):scan skills + 新建 FileReadState + 设 cwd + 迁移 initial_messages
+- build_agent_state(config):scan skills + 新建 FileStateCache + 设 cwd + 迁移 initial_messages
 - build_system_prompt(agent_state, config):config.system + skill 目录(从 agent_state.skills)
 """
 from pathlib import Path
@@ -58,7 +58,7 @@ def test_build_agent_state_migrates_initial_messages(tmp_path):
 def test_build_agent_state_has_fresh_file_read_state(tmp_path):
     cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
     astate = build_agent_state(cfg)
-    # FileReadState 默认空:read 没记录 → get 返回 None
+    # FileStateCache 默认空:read 没记录 → get 返回 None
     assert astate.file_read_state.get("/nope") is None
 
 
