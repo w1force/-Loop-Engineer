@@ -13,6 +13,24 @@ class MCPServerState(str, Enum):
     CONNECTING = "connecting"
     READY = "ready"
     FAILED = "failed"
+    NEEDS_AUTH = "needs_auth"
+    DISABLED = "disabled"
+
+
+class MCPTransport(str, Enum):
+    """MCP server 的连接方式。
+
+    目前只有 stdio 有真实 client。其余值先作为正式扩展入口保留,避免
+    manager/tool_adapter 继续和 stdio 写死在一起。
+    """
+
+    STDIO = "stdio"
+    SSE = "sse"
+    SSE_IDE = "sse-ide"
+    HTTP = "http"
+    WS = "ws"
+    SDK = "sdk"
+    CLAUDEAI_PROXY = "claudeai-proxy"
 
 
 @dataclass(frozen=True)
@@ -31,14 +49,22 @@ class MCPServerHealth:
 
 @dataclass(frozen=True)
 class MCPServerConfig:
-    """一个本地 stdio MCP server 的启动配置。"""
+    """一个 MCP server 的连接配置。
+
+    stdio 是当前唯一真实实现;url/headers/oauth 是远程 transport 的长期扩展口。
+    """
 
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     # env 只叠加到当前进程环境上,便于给某个 MCP server 单独传 token/path。
     env: dict[str, str] = field(default_factory=dict)
     timeout: float = 10.0
+    transport: MCPTransport = MCPTransport.STDIO
+    url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    oauth: dict[str, Any] | None = None
+    disabled: bool = False
 
 
 @dataclass(frozen=True)
