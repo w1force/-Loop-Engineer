@@ -10,6 +10,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from .errors import MCPConfigError
 from .types import MCPProgressEvent, MCPServerConfig, MCPToolResult, MCPToolSpec
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -35,6 +36,10 @@ class StdioMCPClient:
     async def start(self) -> None:
         if self._proc is not None:
             return
+        if not self.config.command:
+            raise MCPConfigError(
+                f"MCP stdio server '{self.config.name}' requires a non-empty command"
+            )
         env = os.environ.copy()
         env.update(self.config.env)
         self._proc = await asyncio.create_subprocess_exec(

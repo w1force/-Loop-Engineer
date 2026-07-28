@@ -5,7 +5,9 @@ import asyncio
 import time
 from collections.abc import Callable
 
-from .client import StdioMCPClient
+from .client_protocol import MCPClientProtocol
+from .errors import MCPTransportUnsupportedError
+from .factory import create_mcp_client
 from .result_policy import MCPResultPolicy
 from .tool_adapter import create_mcp_tool
 from .types import (
@@ -16,9 +18,11 @@ from .types import (
     MCPToolSpec,
 )
 
+MCPClientFactory = Callable[[MCPServerConfig], MCPClientProtocol]
+
 
 class MCPManager:
-    """管理多个 stdio MCP server,并把它们暴露为本项目 Tool。"""
+    """管理多个 MCP server,并把它们暴露为本项目 Tool。"""
 
     def __init__(
         self,
@@ -29,15 +33,23 @@ class MCPManager:
         retry_max_delay: float = 30.0,
         clock: Callable[[], float] | None = None,
         result_policy: MCPResultPolicy | None = None,
+        client_factory: MCPClientFactory | None = None,
     ):
-        self._clients = {cfg.name: StdioMCPClient(cfg) for cfg in configs}
+        self._configs = {cfg.name: cfg for cfg in configs}
+        self._clients: dict[str, MCPClientProtocol] = {}
+        self._client_factory = client_factory or create_mcp_client
         self._tool_wait_timeout = tool_wait_timeout
         self._retry_initial_delay = retry_initial_delay
         self._retry_max_delay = retry_max_delay
         self._clock = clock or time.monotonic
         self._result_policy = result_policy or MCPResultPolicy()
         self._states = {
-            cfg.name: MCPServerState.DISCONNECTED for cfg in configs
+            cfg.name: (
+                MCPServerState.DISABLED
+                if cfg.disabled
+                else MCPServerState.DISCONNECTED
+            )
+            for cfg in configs
         }
         self._errors: dict[str, str | None] = {cfg.name: None for cfg in configs}
         self._tool_cache: dict[str, list[MCPToolSpec]] = {
@@ -61,7 +73,9 @@ class MCPManager:
         这是给测试/脚本/必须依赖 MCP 的入口用的 fail-fast 路径:失败会先写入
         health,再继续抛给调用方。agent 主流程请走 get_tools() 的缓存路径。
         """
-        for server_name in self._clients:
+        for server_name in self._configs:
+            if self._states[server_name] == MCPServerState.DISABLED:
+                continue
             await self._connect_one(server_name, fail_fast=True)
 
     async def close(self) -> None:
@@ -79,12 +93,15 @@ class MCPManager:
     async def list_tools(self) -> list[MCPToolSpec]:
         """阻塞式实时查询 MCP server 工具列表。"""
         specs: list[MCPToolSpec] = []
-        for client in self._clients.values():
+        for server_name in self._configs:
+            if self._states[server_name] == MCPServerState.DISABLED:
+                continue
+            client = self._get_or_create_client(server_name)
             specs.extend(await client.list_tools())
         return specs
 
     async def start_background(self) -> None:
-        for server_name in self._clients:
+        for server_name in self._configs:
             task = self._connect_tasks.get(server_name)
             if task is not None and not task.done():
                 continue
@@ -120,9 +137,11 @@ class MCPManager:
     ) -> MCPToolResult:
         # tool_adapter 保留原始 server/tool 名到 mcp_info,所以执行时不需要再从
         # mcp__server__tool 字符串反解析,也避免归一化名称和原始名称混淆。
-        client = self._clients.get(server_name)
-        if client is None:
+        if server_name not in self._configs:
             raise ValueError(f"未知 MCP server: {server_name}")
+        if self._states[server_name] == MCPServerState.DISABLED:
+            raise ValueError(f"MCP server '{server_name}' is disabled")
+        client = self._get_or_create_client(server_name)
         return await client.call_tool(
             tool_name,
             arguments,
@@ -141,7 +160,7 @@ class MCPManager:
                 last_success_at=self._last_success_at[name],
                 next_retry_at=self._next_retry_at[name],
             )
-            for name in sorted(self._clients)
+            for name in sorted(self._configs)
         ]
 
     async def _wait_for_background_tools(self) -> None:
@@ -155,16 +174,24 @@ class MCPManager:
             await task
 
     async def _connect_one(self, server_name: str, *, fail_fast: bool) -> None:
-        client = self._clients[server_name]
         self._states[server_name] = MCPServerState.CONNECTING
         self._errors[server_name] = None
         self._last_attempt_at[server_name] = self._clock()
         try:
+            client = self._get_or_create_client(server_name)
             await client.start()
             specs = await client.list_tools()
         except asyncio.CancelledError:
             self._states[server_name] = MCPServerState.DISCONNECTED
             raise
+        except MCPTransportUnsupportedError as exc:
+            self._states[server_name] = MCPServerState.FAILED
+            self._errors[server_name] = str(exc)
+            self._tool_cache[server_name] = []
+            self._next_retry_at[server_name] = None
+            if fail_fast:
+                raise
+            return
         except Exception as exc:
             self._states[server_name] = MCPServerState.FAILED
             self._errors[server_name] = str(exc)
@@ -180,8 +207,19 @@ class MCPManager:
         self._last_success_at[server_name] = self._clock()
         self._states[server_name] = MCPServerState.READY
 
+    def _get_or_create_client(self, server_name: str) -> MCPClientProtocol:
+        client = self._clients.get(server_name)
+        if client is not None:
+            return client
+        config = self._configs[server_name]
+        client = self._client_factory(config)
+        self._clients[server_name] = client
+        return client
+
     def _should_start_background_connect(self, server_name: str) -> bool:
         state = self._states[server_name]
+        if state in {MCPServerState.DISABLED, MCPServerState.NEEDS_AUTH}:
+            return False
         if state == MCPServerState.DISCONNECTED:
             return True
         if state != MCPServerState.FAILED:
