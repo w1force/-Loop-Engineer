@@ -23,6 +23,7 @@ from ..file_state import (
     write_text,
 )
 from ..tools import ToolContext, build_tool
+from ..lsp.diagnostic_registry import clear_delivered_diagnostics_for_file
 
 # 乐观锁失败文案(对齐 CC 的 FILE_UNEXPECTEDLY_MODIFIED_ERROR 语义)。
 FILE_MODIFIED_ERROR = "文件在读取后被修改过(可能是用户或 linter 改的),请重新 Read 后再编辑。"
@@ -67,6 +68,9 @@ async def _edit_func(inp: EditInput, ctx: ToolContext) -> str:
                 path,
                 FileState(content=new, timestamp=file_mtime_ms(path), offset=None, limit=None),
             )
+            if ctx.agent_state.lsp_manager:
+                clear_delivered_diagnostics_for_file(path)
+                ctx.agent_state.lsp_manager.notify_file_changed(path, new)
             return f"已创建文件 {inp.file_path}"
         raise ValueError(f"文件不存在: {inp.file_path}(如需新建,请把 old_string 留空)")
 
@@ -100,6 +104,9 @@ async def _edit_func(inp: EditInput, ctx: ToolContext) -> str:
         path,
         FileState(content=updated, timestamp=file_mtime_ms(path), offset=None, limit=None),
     )
+    if ctx.agent_state.lsp_manager:
+        clear_delivered_diagnostics_for_file(path)
+        ctx.agent_state.lsp_manager.notify_file_changed(path, updated)
     n = (current.count(old) if inp.replace_all else 1) if old else 1
     return f"已编辑 {inp.file_path}({n} 处替换)"
 

@@ -5,7 +5,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Callable
 
-from .tools import default_can_use_tool
+from .lsp.constants import LSP_TOOL_NAME
+from .tools import CanUseDecision, default_can_use_tool
 from .types import AgentState, Message, Terminal, TerminalReason, UserMessage
 
 if TYPE_CHECKING:
@@ -22,6 +23,24 @@ class ForkedAgentError(RuntimeError):
     def __init__(self, terminal: Terminal):
         super().__init__(terminal.error or terminal.reason.value)
         self.terminal = terminal
+
+
+def _fork_can_use_tool(parent_can_use_tool: Callable) -> Callable:
+    """保留父工具全集，只在执行权限层阻止 fork 使用 LSP。
+
+    工具 schema 不筛掉；executor 真正执行 func 前
+    统一调用 can_use_tool，因此拒绝不会启动 LSP 子进程。
+    """
+
+    async def can_use_tool(tool_call):
+        if tool_call.name == LSP_TOOL_NAME:
+            return CanUseDecision(
+                allow=False,
+                reason="LSP tool is only available to the main agent",
+            )
+        return await parent_can_use_tool(tool_call)
+
+    return can_use_tool
 
 
 async def run_forked_agent(
@@ -73,7 +92,7 @@ async def run_forked_agent(
         abort_signal=abort_signal or asyncio.Event(),
         tools=parent_params.tools,                         # ★ 父的 tools 全集(缓存 tools 段一致)
         max_turns=max_turns,                               # fork 用小上限
-        can_use_tool=can_use_tool,                         # ★ 权限层限制
+        can_use_tool=_fork_can_use_tool(can_use_tool),     # ★ fork 权限层限制(LSP 仅主 agent)
         tool_execution_mode=parent_params.tool_execution_mode,
         enable_compact=False,                              # ★ fork 内关 microcompact
     )

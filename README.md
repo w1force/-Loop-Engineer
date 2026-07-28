@@ -46,6 +46,29 @@ uv run pytest           # 全套 42 个
 uv run pytest -q        # 精简输出
 ```
 
+## Java / Python LSP
+
+主 Agent 内置 `LSP` 工具，按文件扩展名懒启动外部语言服务器：
+
+- Python：默认 `pyright-langserver --stdio`
+- Java：默认 `jdtls`
+
+二进制需要预先安装并位于 `PATH`。可通过
+`LOOP_ENGINEER_PYTHON_LSP_COMMAND` / `LOOP_ENGINEER_PYTHON_LSP_ARGS` 和
+`LOOP_ENGINEER_JAVA_LSP_COMMAND` / `LOOP_ENGINEER_JAVA_LSP_ARGS` 覆盖命令，
+`LOOP_ENGINEER_LSP_STARTUP_TIMEOUT` 设置初始化超时秒数。forked Agent 继承
+完整工具 schema 以保持缓存前缀，但在执行权限层会拒绝 `LSP`。
+
+工具采用软分工而非硬编码路由：Glob/Grep 用于从文件名、文本关键词或业务概念定位
+初始代码锚点；LSP 用于在已知 Java/Python 文件、符号或位置后追踪定义、引用、实现、
+类型和调用关系。`workspaceSymbol` 的可选 `query` 可直接查询工作区符号，省略时请求
+全部符号。
+
+Edit/Write 后会异步发送 `didChange`/`didSave`。Pyright/JDTLS 随后主动推送
+`textDocument/publishDiagnostics`；诊断经注册表去重和限流（每文件最多 10 条、每轮
+最多 30 条），在下一次主 Agent 模型请求前作为 `<new-diagnostics>` system-reminder
+自动注入。forked Agent 不会接收或消费该诊断附件。
+
 覆盖:`parse_sse`(多行 data/注释/[DONE]/流末补 yield)、`aggregate_stream`(红线#4 先攒齐再 yield、TOOL_USE_DETECTED)、`AnthropicAdapter.stream`(respx mock SSE→StreamEvent)、`RecoveryChain`(→completed)、`orchestrator`(respx 端到端→completed+埋点序列)、`agent_loop`(is_result_successful 三路径 + submit success + transcript 落盘)、桩扩展点(tool_use→run_tools 桩、OpenAI×2 桩)。
 
 ## 常见排错

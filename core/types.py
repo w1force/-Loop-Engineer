@@ -3,15 +3,20 @@
 QueryState/Message 等仍是 pydantic v2(后续工具入参 schema 用 `.model_json_schema()`)。
 AgentState/SkillMeta/Tombstone 是 dataclass(内部状态容器/纯数据,不需校验/序列化)。
 """
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from core.file_state import FileStateCache
+
+if TYPE_CHECKING:
+    from core.lsp.manager import LSPServerManager
 
 
 # ── 消息块 ──────────────────────────────────────────
@@ -216,6 +221,9 @@ class AgentState:
     mc_deleted: set[str] = field(default_factory=set)       # 已通过 cache_edits 通知服务端删除的 id
     # session memory(笔记维护)会话级状态
     sm: SessionMemoryState = field(default_factory=SessionMemoryState)
+    # 主 agent 持有的 LSP manager。forked AgentState 不复制该运行时对象；
+    # fork 仍继承 LSP tool schema，但执行时由 can_use_tool 拒绝。
+    lsp_manager: LSPServerManager | None = None
 
 
 # ── 常量(对齐真实项目 query.ts) ──

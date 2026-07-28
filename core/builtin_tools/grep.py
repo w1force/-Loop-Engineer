@@ -79,7 +79,8 @@ GREP_TOOL = build_tool(
     name="Grep",
     description=(
         "基于 ripgrep 的内容搜索工具。支持完整正则语法;可用 glob 参数过滤文件;"
-        "三种输出模式:content / files_with_matches(默认) / count。用于搜索文件内容。"
+        "三种输出模式:content / files_with_matches(默认) / count。用于按关键词或模式搜索"
+        "文件内容，定位尚不知道文件或符号位置的业务逻辑入口。"
     ),
     input_model=GrepInput,
     func=_grep_func,

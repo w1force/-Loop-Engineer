@@ -1,15 +1,14 @@
 """Bash 工具:执行 shell 命令
 
-  * 「别抢专用工具的活」= 纯 prompt 软引导。CC 代码层面**不拦** bash 里的
+  * 「别抢专用工具的活」= 纯 prompt 软引导。不拦bash 里的
     grep/find/cat/sed/echo(反而因判为只读而顺畅放行),只在 description 里劝导
     改用专用工具 + 给对照表,并留"unless 专用工具搞不定"的逃生阀。本工具照此:
     只在 DESCRIPTION 里软引导,func 不做命令黑名单。
-  * 「别干危险的事」= 属于权限层(can_use_tool)。对齐 CC「安全边界在权限系统」的
-    分工,本工具不自造命令黑名单/沙箱 —— 危险拦截交给 can_use_tool。
+  * 「别干危险的事」= 属于权限层(can_use_tool)。本工具不自造命令黑名单/沙箱 —— 危险拦截交给 can_use_tool。
   * 执行边界照搬 CC 常量:超时默认 2min、上限 10min;输出截断 30K 字符;
     捕获 stdout+stderr+退出码;取消/超时时 kill 子进程。
 
-砍掉的非核心:run_in_background(需后台任务子系统,本项目暂无)、tree-sitter 命令
+未实现:run_in_background(需后台任务子系统,本项目暂无)、tree-sitter 命令
 解析、只读命令动态并发判定
 """
 from __future__ import annotations
@@ -24,7 +23,7 @@ from ..tools import ToolContext, build_tool
 # 执行边界常量
 DEFAULT_TIMEOUT_MS = 120_000   # 2 分钟
 MAX_TIMEOUT_MS = 600_000       # 10 分钟
-MAX_OUTPUT_CHARS = 30_000      # 对齐 CC maxResultSizeChars
+MAX_OUTPUT_CHARS = 30_000
 
 
 def _resolve_timeout_ms(timeout_ms: int | None) -> int:
@@ -51,6 +50,7 @@ async def _bash_func(inp: BashInput, ctx: ToolContext) -> str:
     # 用 bash -c 执行整条命令:command 作为单个 argv 传入,保留管道/重定向等 shell 能力
     proc = await asyncio.create_subprocess_exec(
         "bash", "-c", inp.command,
+        cwd=ctx.agent_state.cwd or None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -81,7 +81,7 @@ async def _bash_func(inp: BashInput, ctx: ToolContext) -> str:
     return body
 
 
-# 软边界 prompt:对齐 CC BashTool/prompt.ts 的 getSimplePrompt
+# 软边界 prompt
 # —— 劝导 + 对照表 + 逃生阀。代码不拦,只靠这段文案引导模型用专用工具。
 DESCRIPTION = (
     "执行一条 bash 命令并返回其输出(stdout + stderr + 退出码)。\n\n"

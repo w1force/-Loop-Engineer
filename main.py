@@ -11,7 +11,12 @@ import logging
 from pydantic import BaseModel
 
 from config import get_settings
-from core.agent_loop import AgentConfig, build_agent_state, submit
+from core.agent_loop import (
+    AgentConfig,
+    build_agent_state,
+    shutdown_agent_state,
+    submit,
+)
 from core.prompts import build_diagnose_system_prompt
 from core.providers.anthropic import AnthropicAdapter
 from core.session_memory import await_pending_extractions
@@ -70,6 +75,7 @@ async def demo_real_llm():
             print(result)
     finally:
         await await_pending_extractions()
+        await shutdown_agent_state(agent_state)
 
 
 async def real_tool_demo():
@@ -93,6 +99,7 @@ async def real_tool_demo():
             print(result)
     finally:
         await await_pending_extractions()
+        await shutdown_agent_state(astate)
 
 
 def log_config():

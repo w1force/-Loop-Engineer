@@ -65,7 +65,11 @@ def test_build_agent_state_has_fresh_file_read_state(tmp_path):
 def test_build_system_prompt_empty_skills():
     astate = AgentState(skills=[])
     cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
-    assert build_system_prompt(astate, cfg) == "base"
+    out = build_system_prompt(astate, cfg)
+    assert isinstance(out, str) and out.startswith("base")
+    assert f"Primary working directory: {cfg.cwd}" in out
+    assert "Bash commands start in this directory" in out
+    assert "<system-reminder>" in out and "或其他标签" in out
 
 
 def test_build_system_prompt_str():
@@ -87,13 +91,25 @@ def test_build_system_prompt_list():
     assert "<skills>" in out[-1]["text"]
 
 
+def test_build_system_prompt_list_includes_agent_cwd():
+    astate = AgentState(skills=[], cwd="/workspace/project")
+    cfg = AgentConfig(
+        provider=_NoopProvider(), system=[{"type": "text", "text": "a"}], model="m", max_tokens=100,
+    )
+    out = build_system_prompt(astate, cfg)
+    assert isinstance(out, list)
+    assert "Primary working directory: /workspace/project" in out[-1]["text"]
+    assert "Bash commands start in this directory" in out[-1]["text"]
+
+
 def test_build_system_prompt_empty_skills_list_passthrough():
-    """空 skills + list[dict] system 也原样返回。"""
+    """空 skills + list[dict] system 也追加通用 system-reminder 说明。"""
     astate = AgentState(skills=[])
     base = [{"type": "text", "text": "a"}]
     cfg = AgentConfig(provider=_NoopProvider(), system=base, model="m", max_tokens=100)
     out = build_system_prompt(astate, cfg)
-    assert out is base
+    assert isinstance(out, list) and out[0] == base[0]
+    assert "<system-reminder>" in out[-1]["text"]
 
 
 def test_build_system_prompt_description_whitespace_collapsed():

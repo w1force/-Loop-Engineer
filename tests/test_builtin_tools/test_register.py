@@ -1,23 +1,15 @@
 """Task 7/Task 3: builtin_tools() 工厂注册测试。
 
-Task 3 起工厂无参,返回核心内置 Tool,func 从 ctx.agent_state 取。
+Task 3 起工厂无参,返回 5 个 Tool(含 load_skill),func 从 ctx.agent_state 取。
 """
 from core.registry import get_tools
 from core.tools import Tool
 
 
-def test_builtin_tools_returns_current_base_set():
+def test_builtin_tools_returns_five():
     tools = get_tools(False)
     names = [t.name for t in tools]
-    assert sorted(names) == [
-        "Bash",
-        "Edit",
-        "Glob",
-        "Grep",
-        "Load_Skill",
-        "Read",
-        "Write",
-    ]
+    assert sorted(names) == ["Glob", "Grep", "Load_Skill", "Read", "Write"]
     for t in tools:
         assert isinstance(t, Tool)
 
@@ -30,8 +22,19 @@ def test_builtin_tools_repeatable():
     a_by_name = {t.name: t for t in a}
     b_by_name = {t.name: t for t in b}
     # registry 单例:两次 get_tools 返回同一 Tool 对象
-    assert a_by_name["Load_Skill"] is b_by_name["Load_Skill"]
+    assert a_by_name["LSP"] is b_by_name["LSP"]
     assert a_by_name["Read"] is b_by_name["Read"]
+
+
+def test_search_and_lsp_descriptions_express_soft_division():
+    tools = {tool.name: tool for tool in get_tools(False)}
+    assert "业务逻辑入口" in tools["Grep"].description
+    assert "尚不知道准确路径" in tools["Glob"].description
+    assert "追踪定义、引用、接口实现" in tools["LSP"].description
+    assert "LSP" not in tools["Grep"].description
+    assert "LSP" not in tools["Glob"].description
+    assert "Grep" not in tools["LSP"].description
+    assert "Glob" not in tools["LSP"].description
 
 
 def test_builtin_tools_read_write_share_agent_state_via_ctx():

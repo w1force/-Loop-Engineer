@@ -16,6 +16,7 @@ from .builtin_tools import (
     LOAD_SKILL_TOOL,
     READ_TOOL,
     WRITE_TOOL,
+    LSP_TOOL
 )
 from .tools import Tool
 
@@ -28,6 +29,7 @@ _BASE_TOOLS: list[Tool] = [
     EDIT_TOOL,
     WRITE_TOOL,
     BASH_TOOL,
+    LSP_TOOL
 ]
 
 
