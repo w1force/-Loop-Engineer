@@ -61,7 +61,8 @@ GLOB_TOOL = build_tool(
     name="Glob",
     description=(
         "快速的文件名模式匹配工具。支持 glob 模式(如 **/*.py、src/**/*.ts),"
-        "返回按修改时间排序的文件路径。用于按文件名查找文件,不搜索内容。"
+        "返回按修改时间排序的文件路径。用于在尚不知道准确路径时按文件名查找文件,"
+        "不搜索文件内容。"
     ),
     # inputschema？
     input_model=GlobInput,

@@ -13,6 +13,7 @@ from typing import Callable, Literal, cast
 
 from ..provider import Provider
 from ..provider_errors import PromptTooLongError, ProviderError
+from ..lsp.attachments import inject_lsp_diagnostic_message
 from ..tool_executor import make_executor
 from ..tools import Tool, ToolContext, default_can_use_tool
 from ..types import (
@@ -86,6 +87,10 @@ async def query_loop(
         #区分forked agent
         if params.enable_compact:
             state = await maybe_compact(agent_state, state, params, tracer)
+
+        # 对齐 CC getLSPDiagnosticAttachments：仅主 Agent 在每次请求模型前，
+        # 把异步 publishDiagnostics 作为 system-reminder 追加进本轮上下文。
+        inject_lsp_diagnostic_message(agent_state, params.tools)
 
         ctx = ToolContext(
             tracer=tracer,

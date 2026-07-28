@@ -20,6 +20,9 @@ import os
 from typing import Callable, Literal, Protocol
 import traceback
 
+from core.registry import get_tools
+from core.lsp import create_lsp_server_manager, default_lsp_server_configs
+from core.lsp.diagnostic_registry import reset_all_lsp_diagnostic_state
 from core.registry import assemble_tool_pool, get_tools
 
 from .loop.orchestrator import QueryParams, query_loop
@@ -94,27 +97,44 @@ def build_agent_state(config: AgentConfig) -> AgentState:
     except Exception as e:
         logger.warning("skill scan failed: %s", e)
         skills = []
+    reset_all_lsp_diagnostic_state()
     return AgentState(
         messages=[*config.initial_messages],
         skills=skills,
         cwd=config.cwd,
+        lsp_manager=create_lsp_server_manager(
+            default_lsp_server_configs(config.cwd)
+        ),
     )
+
+
+async def shutdown_agent_state(agent_state: AgentState) -> None:
+    """释放会话级后台资源；当前主要是外部 LSP 子进程。"""
+    if agent_state.lsp_manager is not None:
+        await agent_state.lsp_manager.shutdown()
+        agent_state.lsp_manager = None
+    reset_all_lsp_diagnostic_state()
 
 
 def build_system_prompt(agent_state: AgentState, config: AgentConfig) -> str | list[dict]:
     skills = agent_state.skills
-    if not skills:
-        return config.system
+    cwd = agent_state.cwd or config.cwd or os.getcwd()
     guidance = (
+        "\n\n# Environment\n"
+        f"- Primary working directory: {cwd}\n"
+        "- Bash commands start in this directory. Do not change directories unless the "
+        "task requires working elsewhere; never guess a working-directory path.\n"
         "\n\n# 关于 <system-reminder>\n"
-        "对话中可能出现 <system-reminder> 标签,里面是系统自动注入的环境信息与提醒"
-        "(例如下面提到的可用 skill 列表)。它们与所在的具体消息没有直接关系,是供你参考的"
-        "背景信息,不要把它们当作用户的提问来回应。\n"
-        "\n# Skill 使用说明\n"
-        "可用 skill 会在对话中以 \"The following skills are available...\" 的形式列出。"
-        "需要用到某个 skill 时,先查看该列表确定 skill 名,再调用 Load_Skill(name) 加载其"
-        "完整指令后执行。重要:只使用列表中列出的 skill,不要臆造或猜测 skill 名。"
+        "工具结果和用户消息中可能出现 <system-reminder> 或其他标签。标签包含有用的系统"
+        "信息和提醒,由系统自动添加,与它所在的具体工具结果或用户消息没有直接关系。"
     )
+    if skills:
+        guidance += (
+            "\n\n# Skill 使用说明\n"
+            "可用 skill 会在对话中以 \"The following skills are available...\" 的形式列出。"
+            "需要用到某个 skill 时,先查看该列表确定 skill 名,再调用 Load_Skill(name) 加载其"
+            "完整指令后执行。重要:只使用列表中列出的 skill,不要臆造或猜测 skill 名。"
+        )
     if isinstance(config.system, str):
         return config.system + guidance
     return [*config.system, {"type": "text", "text": guidance}]
@@ -191,7 +211,7 @@ async def submit(
     # Task 4: skill 目录从 agent_state.skills(build_agent_state 已扫描)拼到 system。
     # Task 3: builtin_tools() 无参(func 从 ctx.agent_state 取,含 load_skill_tool)。
     system = build_system_prompt(agent_state, config)
-    tools = await config.resolve_tools()    # 获取内置工具 + 显式工具 + MCP 工具
+    tools = get_tools(False)    # 获取工具 
 
     params = QueryParams(
         system=system,

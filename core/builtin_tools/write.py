@@ -25,6 +25,7 @@ from ..file_state import (
     write_text,
 )
 from ..tools import ToolContext, build_tool
+from ..lsp.diagnostic_registry import clear_delivered_diagnostics_for_file
 
 # 与 Edit 共用同一文案(对齐 CC 的 FILE_UNEXPECTEDLY_MODIFIED_ERROR 语义)。
 FILE_MODIFIED_ERROR = "文件在读取后被修改过(可能是用户或 linter 改的),请重新 Read 后再覆盖写入。"
@@ -71,6 +72,9 @@ async def _write_func(inp: WriteInput, ctx: ToolContext) -> str:
         path,
         FileState(content=inp.content, timestamp=file_mtime_ms(path), offset=None, limit=None),
     )
+    if ctx.agent_state.lsp_manager:
+        clear_delivered_diagnostics_for_file(path)
+        ctx.agent_state.lsp_manager.notify_file_changed(path, inp.content)
     verb = "覆盖写入" if exists else "创建"
     return f"已{verb} {inp.file_path}"
 

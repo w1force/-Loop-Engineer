@@ -10,13 +10,16 @@ from .load_skill import LOAD_SKILL_TOOL
 from .write import WRITE_TOOL
 from .read import READ_TOOL
 from .bash import BASH_TOOL
+from .lsp import LSP_TOOL
 
 __all__ = [
+    "BASH_TOOL",
     "EDIT_TOOL",
     "GLOB_TOOL",
     "GREP_TOOL",
-    "LOAD_SKILL_TOOL",
-    "WRITE_TOOL",
+    "LSP_TOOL",
     "READ_TOOL",
-    "BASH_TOOL",
+    "WRITE_TOOL",
+    "LOAD_SKILL_TOOL"
 ]
+

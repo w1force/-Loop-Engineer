@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-# ── 1. 身份 / intro(对标 getSimpleIntroSection) ──────────────────────
+# ── 1. 身份 / intro ──────────────────────
 def _intro_section() -> str:
     return (
         "You are a diagnose assistant, an autonomous engineering agent that runs a "
@@ -17,7 +17,7 @@ def _intro_section() -> str:
     )
 
 
-# ── 2. System(对标 getSimpleSystemSection,裁到与诊断相关) ────────────
+# ── 2. System ────────────
 def _system_section() -> str:
     items = [
         "All text you output outside of tool calls is shown to the user. Use it to "
@@ -37,7 +37,7 @@ def _system_section() -> str:
     return "# System\n" + "\n".join(f"- {it}" for it in items)
 
 
-# ── 3. 诊断闭环(领域核心,CC 无对应段,是本项目的 Doing-tasks 特化) ──
+# ── 3. 诊断闭环──
 def _loop_section() -> str:
     return (
         "# The diagnosis loop\n"
@@ -64,7 +64,7 @@ def _loop_section() -> str:
     )
 
 
-# ── 4. Working on the issue(对标 getSimpleDoingTasksSection 的 scope 条) ──
+# ── 4. Working on the issue ──
 def _working_section() -> str:
     items = [
         "Stay within the reported issue. Diagnose and fix the problem you were given — "
@@ -87,7 +87,22 @@ def _working_section() -> str:
     return "# Working on the issue\n" + "\n".join(f"- {it}" for it in items)
 
 
-# ── 5. 如实报告(对标 CC 的 false-claims mitigation 条) ─────────────────
+# ── 5. 工具分工
+def _tools_section() -> str:
+    return (
+        "# Using code tools\n"
+        "- Search before saying unknown. When you do not yet know the relevant file or "
+        "symbol location, use Glob for file-name patterns and Grep for source-text or "
+        "business-concept searches.\n"
+        "- Use LSP for semantic navigation once you have a Java/Python file, symbol, or "
+        "position: definitions, references, implementations, hover/type information, "
+        "document/workspace symbols, and incoming/outgoing calls.\n"
+        "- Read the resulting source before drawing conclusions. LSP locates semantic "
+        "relationships; it does not decide which code implements a business concept."
+    )
+
+
+# ── 6. 如实报告
 def _reporting_section() -> str:
     return (
         "# Reporting outcomes faithfully\n"
@@ -101,7 +116,7 @@ def _reporting_section() -> str:
     )
 
 
-# ── 6. 收尾与预算(prompt 侧,呼应代码里的 max_turns 收尾) ──────────────
+# ── 7. 收尾与预算 ──────────────
 def _finishing_section() -> str:
     return (
         "# Finishing and limits\n"
@@ -115,7 +130,7 @@ def _finishing_section() -> str:
     )
 
 
-# ── 7. Executing actions with care(对标 getActionsSection,面向部署/回滚) ──
+# ── 8. Executing actions with care ──
 def _actions_section() -> str:
     return (
         "# Executing actions with care\n"
@@ -137,7 +152,7 @@ def _actions_section() -> str:
     )
 
 
-# ── 8. Communication style(对标 getOutputEfficiencySection) ────────────
+# ── 9. Communication style ────────────
 def _communication_section() -> str:
     return (
         "# Communication style\n"
@@ -175,6 +190,7 @@ def build_diagnose_system_prompt() -> str:
         _system_section(),
         _loop_section(),
         _working_section(),
+        _tools_section(),
         _reporting_section(),
         _finishing_section(),
         _actions_section(),

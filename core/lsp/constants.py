@@ -1,0 +1,5 @@
+"""LSP 共享常量。"""
+
+LSP_TOOL_NAME = "LSP"
+MAX_LSP_FILE_SIZE_BYTES = 10_000_000
+
