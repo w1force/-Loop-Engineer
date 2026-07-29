@@ -211,7 +211,9 @@ async def submit(
     # Task 4: skill 目录从 agent_state.skills(build_agent_state 已扫描)拼到 system。
     # Task 3: builtin_tools() 无参(func 从 ctx.agent_state 取,含 load_skill_tool)。
     system = build_system_prompt(agent_state, config)
-    tools = get_tools(False)    # 获取工具 
+    # 合并内置 + 显式 + mcp 工具(对齐 resolve_tools 语义);mcp_manager 为 None 时
+    # 退化为纯内置工具集,与原 get_tools(False) 等价,向后兼容。
+    tools = await config.resolve_tools()
 
     params = QueryParams(
         system=system,
