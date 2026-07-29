@@ -30,3 +30,4 @@ tmp-dir/
 .vscode/
 # 临时文件夹
 logs/
+runs/

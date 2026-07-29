@@ -19,15 +19,20 @@ description: 排查 agent loop 运行问题时使用——用 jq 从运行日志
 
 ## 事件 kind 速查
 
+> 权威清单 = `telemetry/events.py` 的 `TraceKind` 枚举(代码更新后以它为准,本表随代码同步)。下表为实际有 emit 的 kind;`stream_start` / `text_delta` 仅枚举占位、默认**不**出现在日志里。
+
 | kind | 含义 | payload 关键字段 |
 |---|---|---|
 | `turn_start` / `turn_end` | 每轮起止 | turn_end:`stop_reason` |
 | `transition` | 状态转换 | `reason`(next_turn / max_output_tokens_escalate / network_retry / completed / ...) |
 | `provider_request` | LLM 请求 | `model`,`msg_count`,**`req_body`**(messages/system/tools/max_tokens) |
-| `llm_response` | LLM 响应 | **`stop_reason`,`usage`,`blocks`,`raw_events`**,`error` |
-| `provider_error` | provider 调用失败 | `status`/`body` 或 `transport` 或 `event` |
+| `stream_end` | 一轮流式收尾(原始流时刻) | `stop_reason`,`usage` —— 与 `llm_response`(聚合后整轮)互补 |
 | `tool_use_detected` | 流式检测到工具调用 | `tool_name`,`tool_use_id` |
+| `llm_response` | LLM 响应(聚合后整轮) | **`stop_reason`,`usage`,`blocks`,`raw_events`**,`error` |
+| `provider_error` | provider 调用失败 | `status`/`body` 或 `transport` 或 `event` |
 | `tool_exec_start` / `tool_exec_end` | 工具执行 | start:`tool_name`,`input`;end:`is_error`,`result`,`error` |
+| `tool_exec_progress` | MCP 工具进度通知(MCP progress) | `server_name`,`tool_name`,`progress`,`total`,`message` |
+| `compact_start` / `compact_end` | 上下文压缩(full compact) | start:`strategy`,`trigger`;end:`strategy`,`trigger`,`success`,`reason` |
 | `recovery_attempt` | 兜底规则命中 | `rule`,`withheld` / `error` |
 | `tool_input_malformed` | LLM 的 tool_use input 非合法 object,被兜底成 {} | `tool_use_id`,`tool_name`,`reason`,`parsed_type`,**`raw_input_buf`** |
 | `run_error` | 未捕获异常(崩溃) | `type`,`message`,**`traceback`** |
@@ -91,6 +96,11 @@ jq -c 'select(.kind=="run_error")|.payload' $F      # 未捕获异常(崩溃,含
 jq -c 'select(.kind=="recovery_attempt" or .kind=="transition")|{seq,turn,kind,payload}' $F
 ```
 
+### 上下文压缩(是否触发 compact、为什么、成没成功)
+```bash
+jq -c 'select(.kind=="compact_start" or .kind=="compact_end")|{turn,strategy:.payload.strategy,trigger:.payload.trigger,success:.payload.success,reason:.payload.reason}' $F
+```
+
 ## 排查思路
 
 1. `{seq,turn,kind}` 总览 → 定位异常区间(哪一轮、哪个事件)
@@ -100,6 +110,7 @@ jq -c 'select(.kind=="recovery_attempt" or .kind=="transition")|{seq,turn,kind,p
    - 工具失败 → `tool_exec_end.error`(type/message/traceback)
    - 崩溃 → `run_error.traceback`
    - 兜底没触发 → 看 `llm_response.stop_reason` 是否等于代码预期的 `"max_tokens"`(stream_turn.py:176)
+   - 上下文被压缩/莫名丢历史 → `compact_start`/`compact_end` 的 `trigger`/`success`/`reason`
 
 ## 取某次请求/响应的完整内容(确认要全量看时)
 
