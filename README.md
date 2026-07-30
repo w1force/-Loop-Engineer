@@ -121,3 +121,39 @@ config.py  main.py  tests/
 ## 后续 Phase
 
 Phase 2(工具执行)→ 3(agent_loop resume)→ 4(OpenAI)→ 5(recovery:两段式 max_tokens / prompt_too_long 压缩链 / 触发式 autocompact)→ 6(并发工具等可选)。桩的签名已定死,届时只填实现体。
+
+## 诊断领域内核 (`diagnose/`) 一期
+
+`diagnose/` 是独立于 `core/` 的诊断领域内核, 一期已完成模型 / 平台协议与 Registry /
+证据登记与结论校验 / Planner 与 Session / Java-JVM 占位平台, 并暴露稳定公共 API。
+该包不依赖 `core/`, 不调用 LLM/Provider, 可被普通 Python 直接调用。
+
+**状态**: Java/JVM 是已知但 `PLANNED` 的平台 —— 可创建 session 并做轻量工件校验,
+但不执行任何分析 action, 结果恒为 `INSUFFICIENT_CAPABILITY`, `root_cause` 为 `None`
+(不假装能诊断)。Case 格式与字段约束见 [`docs/diagnosis/case-format.md`](docs/diagnosis/case-format.md)。
+
+入口示例:
+
+```python
+from diagnose import (
+    ArtifactKind,
+    ArtifactRef,
+    DiagnosisCase,
+    DiagnosisStatus,
+    builtin_platform_registry,
+    create_diagnosis_session,
+)
+
+case = DiagnosisCase(
+    id="case-java-1",
+    platform_id="java-jvm",
+    root_dir="/path/to/case-root",
+    artifacts=[ArtifactRef(id="a-log", kind=ArtifactKind.LOG, path="app.log")],
+)
+session = create_diagnosis_session(case, builtin_platform_registry())
+result = session.build_result()
+# result.status == DiagnosisStatus.INSUFFICIENT_CAPABILITY
+# result.root_cause is None
+```
+
+测试: `uv run pytest tests/diagnose -q`; 类型检查: `uv run pyright diagnose`。
