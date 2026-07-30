@@ -12,11 +12,37 @@ from pydantic import BaseModel
 
 from config import get_settings
 from core.agent_loop import AgentConfig, build_agent_state, submit
+from core.mcp import MCPManager, build_tda_mcp_config, load_mcp_configs
 from core.prompts import build_diagnose_system_prompt
 from core.providers.anthropic import AnthropicAdapter
 from core.session_memory import await_pending_extractions
 from core.tools import Tool
 from telemetry.file_tracer import FileTracer
+
+
+def build_mcp_manager_from_settings(s) -> MCPManager | None:
+    """按配置装配外部 MCP server。
+
+    优先读取 CCB 风格的 mcpServers JSON 配置;TDA 环境变量只作为快捷入口保留。
+    默认关闭,避免普通开发环境启动 main.py 时额外拉起外部进程。
+    """
+
+    mcp_config_items = [*s.mcp_config]
+    if s.mcp_config_path:
+        mcp_config_items.append(s.mcp_config_path)
+    if mcp_config_items:
+        configs = load_mcp_configs(mcp_config_items)
+        return MCPManager(configs, tool_wait_timeout=s.mcp_tool_wait_timeout)
+    if not s.tda_enabled:
+        return None
+    if not s.tda_jar_path:
+        raise ValueError(
+            "LOOP_ENGINEER_TDA_ENABLED=true 时必须设置 LOOP_ENGINEER_TDA_JAR_PATH"
+        )
+    return MCPManager(
+        [build_tda_mcp_config(s.tda_jar_path, timeout=s.tda_timeout)],
+        tool_wait_timeout=s.tda_tool_wait_timeout,
+    )
 
 
 async def demo_real_llm():
@@ -77,6 +103,7 @@ async def real_tool_demo():
     s = get_settings()
     provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url, debug_sse=s.debug_sse)
     tracer = FileTracer(ctx={"chain_id": "demo"}, enabled=s.run_log_enabled)
+    mcp_manager = build_mcp_manager_from_settings(s)
     config = AgentConfig(
         provider=provider,
         system=build_diagnose_system_prompt(),
@@ -85,13 +112,17 @@ async def real_tool_demo():
         max_turns=s.max_turns,
         tool_execution_mode="streaming",
         transcript_path="run.transcript.jsonl",
+        mcp_manager=mcp_manager,
     )
     user_input = "审计一下我项目中关于工具调用的实现方式，然后在tests文件夹下面写一个demo版"
     astate = build_agent_state(config)
     try:
+        await config.start_background_tools()
         async for result in submit(user_input, astate, config, tracer):
             print(result)
     finally:
+        if mcp_manager is not None:
+            await mcp_manager.close()
         await await_pending_extractions()
 
 

@@ -164,3 +164,28 @@ async def test_disabled_server_is_visible_but_never_started():
         assert health.tool_count == 0
     finally:
         await manager.close()
+
+
+async def test_ready_tools_snapshot_does_not_start_disconnected_server():
+    """缓存快照只能读取已 READY 工具,不能偷偷启动 MCP 连接。"""
+    created: list[str] = []
+
+    def factory(config: MCPServerConfig) -> FakeMCPClient:
+        created.append(config.name)
+        return FakeMCPClient(config)
+
+    manager = MCPManager(
+        [MCPServerConfig(name="lazy", command="unused")],
+        client_factory=factory,
+        tool_wait_timeout=0.1,
+    )
+
+    try:
+        tools = await manager.get_ready_tools()
+        health = manager.health()[0]
+
+        assert tools == []
+        assert created == []
+        assert health.state == MCPServerState.DISCONNECTED
+    finally:
+        await manager.close()

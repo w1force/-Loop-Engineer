@@ -16,6 +16,7 @@ from .types import (
     MCPServerState,
     MCPToolResult,
     MCPToolSpec,
+    MCPTransport,
 )
 
 MCPClientFactory = Callable[[MCPServerConfig], MCPClientProtocol]
@@ -31,6 +32,7 @@ class MCPManager:
         tool_wait_timeout: float = 0.0,
         retry_initial_delay: float = 1.0,
         retry_max_delay: float = 30.0,
+        retry_max_attempts: int = 5,
         clock: Callable[[], float] | None = None,
         result_policy: MCPResultPolicy | None = None,
         client_factory: MCPClientFactory | None = None,
@@ -41,6 +43,7 @@ class MCPManager:
         self._tool_wait_timeout = tool_wait_timeout
         self._retry_initial_delay = retry_initial_delay
         self._retry_max_delay = retry_max_delay
+        self._retry_max_attempts = retry_max_attempts
         self._clock = clock or time.monotonic
         self._result_policy = result_policy or MCPResultPolicy()
         self._states = {
@@ -56,6 +59,8 @@ class MCPManager:
             cfg.name: [] for cfg in configs
         }
         self._connect_tasks: dict[str, asyncio.Task[None]] = {}
+        self._retry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._closed = False
         self._failure_counts: dict[str, int] = {cfg.name: 0 for cfg in configs}
         self._last_attempt_at: dict[str, float | None] = {
             cfg.name: None for cfg in configs
@@ -79,14 +84,20 @@ class MCPManager:
             await self._connect_one(server_name, fail_fast=True)
 
     async def close(self) -> None:
-        tasks = [task for task in self._connect_tasks.values() if not task.done()]
+        self._closed = True
+        tasks = [
+            task
+            for task in [*self._connect_tasks.values(), *self._retry_tasks.values()]
+            if not task.done()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._connect_tasks.clear()
-        for name, client in self._clients.items():
-            await client.close()
+        self._retry_tasks.clear()
+        for name in list(self._clients):
+            await self._close_client(name)
             if self._states[name] == MCPServerState.CONNECTING:
                 self._states[name] = MCPServerState.DISCONNECTED
 
@@ -101,6 +112,8 @@ class MCPManager:
         return specs
 
     async def start_background(self) -> None:
+        if self._closed:
+            return
         for server_name in self._configs:
             task = self._connect_tasks.get(server_name)
             if task is not None and not task.done():
@@ -120,6 +133,23 @@ class MCPManager:
         specs = [
             spec
             for server_name in sorted(self._tool_cache)
+            for spec in self._tool_cache[server_name]
+        ]
+        return [
+            create_mcp_tool(spec, self, result_policy=self._result_policy)
+            for spec in specs
+        ]
+
+    async def get_ready_tools(self):
+        """只读取当前 READY server 的工具缓存,不启动连接、不等待慢 server。
+
+        这个入口给 query_loop 的 refreshTools 使用:连接生命周期由
+        start_background/backoff 负责,刷新工具列表时只拿已经发现成功的工具。
+        """
+        specs = [
+            spec
+            for server_name in sorted(self._tool_cache)
+            if self._states[server_name] == MCPServerState.READY
             for spec in self._tool_cache[server_name]
         ]
         return [
@@ -197,7 +227,9 @@ class MCPManager:
             self._errors[server_name] = str(exc)
             self._tool_cache[server_name] = []
             self._schedule_retry(server_name)
-            await client.close()
+            await self._close_client(server_name)
+            if not fail_fast:
+                self._schedule_background_retry(server_name)
             if fail_fast:
                 raise
             return
@@ -216,6 +248,12 @@ class MCPManager:
         self._clients[server_name] = client
         return client
 
+    async def _close_client(self, server_name: str) -> None:
+        client = self._clients.pop(server_name, None)
+        if client is None:
+            return
+        await client.close()
+
     def _should_start_background_connect(self, server_name: str) -> bool:
         state = self._states[server_name]
         if state in {MCPServerState.DISABLED, MCPServerState.NEEDS_AUTH}:
@@ -229,9 +267,55 @@ class MCPManager:
 
     def _schedule_retry(self, server_name: str) -> None:
         self._failure_counts[server_name] += 1
+        if self._failure_counts[server_name] >= self._retry_max_attempts:
+            self._next_retry_at[server_name] = None
+            return
         delay = self._next_retry_delay(self._failure_counts[server_name])
         self._next_retry_at[server_name] = self._clock() + delay
 
     def _next_retry_delay(self, failure_count: int) -> float:
         delay = self._retry_initial_delay * (2 ** max(failure_count - 1, 0))
         return min(delay, self._retry_max_delay)
+
+    def _supports_background_retry(self, server_name: str) -> bool:
+        transport = self._configs[server_name].transport
+        return transport not in {
+            # 对齐 CCB:stdio 是本地进程,sdk 是内部 client,断开后不默认后台自重连。
+            # 如 TDA 未来需要 stdio 自动重启,应显式加业务配置,不能混进通用默认。
+            MCPTransport.STDIO,
+            MCPTransport.SDK,
+        }
+
+    def _schedule_background_retry(self, server_name: str) -> None:
+        if self._closed or not self._supports_background_retry(server_name):
+            return
+        next_retry_at = self._next_retry_at[server_name]
+        if next_retry_at is None:
+            return
+        task = self._retry_tasks.get(server_name)
+        if task is not None and not task.done():
+            return
+        delay = max(next_retry_at - self._clock(), 0.0)
+        self._retry_tasks[server_name] = asyncio.create_task(
+            self._retry_background_after_delay(server_name, delay)
+        )
+
+    async def _retry_background_after_delay(
+        self, server_name: str, delay: float
+    ) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if self._closed or not self._should_start_background_connect(server_name):
+                return
+            current = asyncio.current_task()
+            if current is not None:
+                self._connect_tasks[server_name] = current
+            await self._connect_one(server_name, fail_fast=False)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current = asyncio.current_task()
+            if self._connect_tasks.get(server_name) is current:
+                self._connect_tasks.pop(server_name, None)
+            if self._retry_tasks.get(server_name) is current:
+                self._retry_tasks.pop(server_name, None)

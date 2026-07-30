@@ -108,3 +108,32 @@ def test_build_system_prompt_description_whitespace_collapsed():
     cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
     out = build_system_prompt(astate, cfg)
     assert "line one line two" in out
+
+
+async def test_agent_config_can_preconnect_tool_provider_before_submit():
+    """agent/session 初始化可以先启动动态工具提供者,不等 resolve_tools 临时触发。"""
+    events: list[str] = []
+
+    class _Provider:
+        async def start_background(self):
+            events.append("start_background")
+
+        async def get_tools(self):
+            events.append("get_tools")
+            return []
+
+        async def get_ready_tools(self):
+            events.append("get_ready_tools")
+            return []
+
+    cfg = AgentConfig(
+        provider=_NoopProvider(),
+        system="base",
+        model="m",
+        max_tokens=100,
+        mcp_manager=_Provider(),
+    )
+
+    await cfg.start_background_tools()
+
+    assert events == ["start_background"]

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "tda": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-Djava.awt.headless=true",
+        "-jar",
+        "${TDA_JAR_PATH}",
+        "--mcp"
+      ],
+      "timeout": 60
+    }
+  }
+}

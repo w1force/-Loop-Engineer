@@ -1,7 +1,10 @@
 """MCP FAILED 后自动重连专项测试。"""
 from __future__ import annotations
 
+import asyncio
+
 from core.mcp import MCPManager, MCPServerConfig, MCPServerHealth, MCPServerState
+from core.mcp.types import MCPTransport
 from core.mcp.types import MCPToolSpec
 
 
@@ -160,5 +163,71 @@ async def test_retry_success_resets_failure_state():
         assert health.failure_count == 0
         assert health.next_retry_at is None
         assert health.last_success_at == 100.0
+    finally:
+        await manager.close()
+
+
+async def test_remote_failed_background_connect_retries_without_get_tools_trigger():
+    """远程 transport 失败后由连接层按 backoff 自动重试,不是等下一次 get_tools。"""
+    attempts = 0
+
+    class RemoteClient:
+        def __init__(self, should_fail: bool):
+            self.config = MCPServerConfig(
+                name="remote", transport=MCPTransport.HTTP, url="https://mcp.example.invalid"
+            )
+            self.should_fail = should_fail
+            self.closed = False
+
+        async def start(self):
+            if self.should_fail:
+                raise RuntimeError("temporary remote outage")
+
+        async def list_tools(self):
+            return [
+                MCPToolSpec(
+                    server_name="remote",
+                    name="diagnose",
+                    description="Diagnose runtime evidence",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ]
+
+        async def call_tool(self, name, arguments, *, progress_callback=None):
+            raise AssertionError("not used")
+
+        async def close(self):
+            self.closed = True
+
+    def factory(config):
+        nonlocal attempts
+        attempts += 1
+        return RemoteClient(should_fail=attempts == 1)
+
+    manager = MCPManager(
+        [
+            MCPServerConfig(
+                name="remote",
+                transport=MCPTransport.HTTP,
+                url="https://mcp.example.invalid",
+            )
+        ],
+        client_factory=factory,
+        tool_wait_timeout=0.0,
+        retry_initial_delay=0.01,
+        retry_max_delay=0.01,
+    )
+    try:
+        await manager.start_background()
+        await asyncio.sleep(0.08)
+
+        health = manager.health()[0]
+        tools = await manager.get_ready_tools()
+
+        assert attempts == 2
+        assert health.state == MCPServerState.READY
+        assert health.failure_count == 0
+        assert health.next_retry_at is None
+        assert [tool.name for tool in tools] == ["mcp__remote__diagnose"]
     finally:
         await manager.close()

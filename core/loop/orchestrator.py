@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
+from inspect import isawaitable
 import logging
 from typing import Callable, Literal, cast
 
@@ -54,6 +55,9 @@ class QueryParams:
     # 是否在每轮进循环前跑 microcompact(默认开)。forked agent 置 False:
     # 关掉会就地改 tool_result 内容的时间式 microcompact,避免污染父共享的消息对象。
     enable_compact: bool = True
+    # 对齐 CCB ToolUseContext.options.refreshTools:每轮工具执行后、下一轮模型请求前,
+    # 重新读取最新工具视图。它只刷新工具列表,不负责连接/重连 MCP server。
+    refresh_tools: Callable[[], list[Tool] | Awaitable[list[Tool]]] | None = None
 
 
 def _emit_transition(tracer: Tracer, transition) -> None:
@@ -200,6 +204,7 @@ async def query_loop(
             # 此处只 append 工具结果(原地)+ model_copy 重建 turn_count/transition(不 update messages)。
             tool_results = await executor.get_results()
             state.messages.append(UserMessage(content=cast(list[ContentBlock], tool_results)))  # ★ 原地 append
+            await _refresh_tools_between_turns(params, tracer)
             state = state.model_copy(                        # ★ model_copy 不 update messages(引用保持)
                 update={
                     "turn_count": state.turn_count + 1,
@@ -226,3 +231,22 @@ async def query_loop(
         if decision.next_state is None:
             return
         state = decision.next_state
+
+
+async def _refresh_tools_between_turns(params: QueryParams, tracer: Tracer) -> None:
+    """工具回灌后刷新下一轮可见工具。
+
+    CCB 在 query.ts 中同样把 refreshTools 放在 tool results 之后、next turn
+    之前。这里失败只记录 warning,保留旧工具继续跑,避免动态 MCP 刷新误伤主流程。
+    """
+    if params.refresh_tools is None:
+        return
+    try:
+        refreshed = params.refresh_tools()
+        if isawaitable(refreshed):
+            refreshed = await refreshed
+    except Exception as exc:
+        logger.warning("refresh tools failed: %s", exc)
+        return
+    if isinstance(refreshed, list) and refreshed is not params.tools:
+        params.tools = refreshed

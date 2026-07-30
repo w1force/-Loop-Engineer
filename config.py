@@ -12,6 +12,7 @@
     LOOP_ENGINEER_MAX_TURNS   内层 query_loop 最大轮次守卫
 """
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -30,6 +31,13 @@ class Settings(BaseSettings):
     debug_sse: bool = False  # LOOP_ENGINEER_DEBUG_SSE=true 时打印原始 SSE 流
     run_log_enabled: bool = True  # ★ 结构化运行日志(FileTracer 写 JSONL, jq 可查)
     run_log_path: str | None = None  # None → FileTracer 默认 logs/{时间戳}.jsonl;设了则原样用(不拼接)
+    mcp_config: list[str] = Field(default_factory=list)  # LOOP_ENGINEER_MCP_CONFIG='[".mcp.json", "{...}"]'
+    mcp_config_path: str = ""  # LOOP_ENGINEER_MCP_CONFIG_PATH=.mcp.json,单文件便捷入口
+    mcp_tool_wait_timeout: float = 5.0  # 首轮等 MCP 工具列表的最长时间;超时后主流程继续
+    tda_enabled: bool = False  # LOOP_ENGINEER_TDA_ENABLED=true 时把真实 TDA MCP 接进 agent
+    tda_jar_path: str = ""  # LOOP_ENGINEER_TDA_JAR_PATH=/path/to/tda-3.2.jar
+    tda_timeout: float = 60.0  # TDA 启动和分析 thread dump 可能比普通 MCP 工具慢
+    tda_tool_wait_timeout: float = 5.0  # 首轮等 TDA 工具列表的最长时间;超时后主流程继续
 
 
 def get_settings() -> Settings:

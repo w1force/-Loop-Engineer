@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from inspect import isawaitable
 import logging
 import os
 from typing import Callable, Literal, Protocol
@@ -73,7 +74,30 @@ class AgentConfig:
     cwd: str = field(default_factory=os.getcwd)   # ★ Task 4 新增
     mcp_manager: ToolProvider | None = None
 
-    async def resolve_tools(self) -> list[Tool]:
+    async def start_background_tools(self) -> None:
+        """启动动态工具提供者的后台连接,用于 session/agent 初始化阶段预热。"""
+        if self.mcp_manager is None:
+            return
+        start_background = getattr(self.mcp_manager, "start_background", None)
+        if start_background is None:
+            return
+        result = start_background()
+        if isawaitable(result):
+            await result
+
+    async def _mcp_tools(self, *, ready_only: bool) -> list[Tool]:
+        if self.mcp_manager is None:
+            return []
+        if ready_only:
+            get_ready_tools = getattr(self.mcp_manager, "get_ready_tools", None)
+            if get_ready_tools is not None:
+                result = get_ready_tools()
+                if isawaitable(result):
+                    return await result
+                return result
+        return await self.mcp_manager.get_tools()
+
+    async def resolve_tools(self, *, ready_only_mcp: bool = False) -> list[Tool]:
         """组合内置工具、调用方显式工具和 MCP 工具。
 
         MCP 工具来自 mcp_manager,再交给 registry.assemble_tool_pool 做稳定排序
@@ -82,8 +106,15 @@ class AgentConfig:
         # 对齐 Claude Code 的思路:QueryEngine/agent_loop 不关心 MCP client 怎么连,
         # 只在发模型请求前拿到一份完整工具池。这样 provider 和 executor 仍只认 Tool。
         base_tools = get_tools(False) + list(self.tools)
-        mcp_tools = await self.mcp_manager.get_tools() if self.mcp_manager else []
+        mcp_tools = await self._mcp_tools(ready_only=ready_only_mcp)
         return assemble_tool_pool(base_tools, mcp_tools)
+
+    async def refresh_tools(self) -> list[Tool]:
+        """读取最新工具视图,给 query_loop turn 间 refreshTools 使用。
+
+        这里刻意只读 READY 的动态工具缓存,避免每个 turn 后把工具刷新变成连接重试。
+        """
+        return await self.resolve_tools(ready_only_mcp=True)
 
 
 def build_agent_state(config: AgentConfig) -> AgentState:
@@ -185,6 +216,7 @@ async def submit(
     Task 4: system 用 build_system_prompt(替 prepare_skills);
     budget 累积到 agent_state.total_*_tokens(跨 submit 持久)。
     """
+    await config.start_background_tools()
     agent_state.messages.append(UserMessage(content=prompt))   # ★ 跨 submit 累积
     await record_transcript(agent_state.messages, config.transcript_path)  # 红线#5
 
@@ -204,6 +236,7 @@ async def submit(
         can_use_tool=config.can_use_tool,
         tool_execution_mode=config.tool_execution_mode,
         transcript_path=config.transcript_path,
+        refresh_tools=config.refresh_tools,
     )
 
     last_stop_reason: str | None = None

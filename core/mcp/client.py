@@ -27,6 +27,8 @@ class StdioMCPClient:
     def __init__(self, config: MCPServerConfig):
         self.config = config
         self._proc: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail = ""
         self._next_id = 1
         # MCP stdio 是一条 stdin/stdout 管道。这里先串行 request,避免多个协程
         # 同时读 stdout 导致响应被错误消费。
@@ -50,6 +52,7 @@ class StdioMCPClient:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))
         result = await self._request(
             "initialize",
             {
@@ -110,6 +113,9 @@ class StdioMCPClient:
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        if self._stderr_task is not None:
+            await self._stderr_task
+            self._stderr_task = None
 
     def _ensure_started(self) -> None:
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
@@ -151,7 +157,10 @@ class StdioMCPClient:
                     self._proc.stdout.readline(), timeout=self.config.timeout
                 )
                 if not line:
-                    raise RuntimeError(f"MCP server '{self.config.name}' closed stdout")
+                    detail = _format_stderr_tail(self._stderr_tail)
+                    raise RuntimeError(
+                        f"MCP server '{self.config.name}' closed stdout{detail}"
+                    )
                 response = json.loads(line.decode("utf-8"))
                 if response.get("method") == "notifications/progress":
                     event = _parse_progress(dict(response.get("params") or {}))
@@ -169,6 +178,16 @@ class StdioMCPClient:
                     err = response["error"]
                     raise RuntimeError(err.get("message") or str(err))
                 return dict(response.get("result") or {})
+
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.stderr is None:
+            return
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                return
+            text = chunk.decode("utf-8", errors="replace")
+            self._stderr_tail = (self._stderr_tail + text)[-65536:]
 
 
 def _to_tool_result(
@@ -211,3 +230,10 @@ def _parse_progress(params: dict) -> MCPProgressEvent:
         total=params.get("total"),
         message=params.get("message"),
     )
+
+
+def _format_stderr_tail(stderr_tail: str) -> str:
+    text = stderr_tail.strip()
+    if not text:
+        return ""
+    return f"; stderr tail: {text[-2000:]}"

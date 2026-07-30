@@ -158,6 +158,23 @@ def _text_events_async(text="ok", stop="end_turn"):
     return _g()
 
 
+def _tool_use_events_async(name="first", tool_use_id="t1"):
+    async def _g():
+        for e in [
+            StreamEvent(type="message_start"),
+            StreamEvent(type="content_block_start", index=0,
+                        block={"type": "tool_use", "id": tool_use_id, "name": name,
+                               "input": {}}),
+            StreamEvent(type="content_block_delta", index=0, delta={"tool_input": "{}"}),
+            StreamEvent(type="content_block_stop", index=0),
+            StreamEvent(type="message_delta", delta={"stop_reason": "tool_use"},
+                        message={"usage": {"input_tokens": 1, "output_tokens": 1}}),
+            StreamEvent(type="message_stop"),
+        ]:
+            yield e
+    return _g()
+
+
 def _params_with(provider, spy_tracer=None) -> QueryParams:
     return QueryParams(
         system="", model="m", max_tokens=16,
@@ -482,3 +499,69 @@ async def test_withheld_to_recovery_no_duplicate_assistant(monkeypatch):
     # submit 收到 3 条 AssistantMessage yield(整轮透传:UI 可见所有片段)
     yielded = [m for m in out if isinstance(m, AssistantMessage)]
     assert len(yielded) == 3
+
+
+async def test_refresh_tools_runs_after_tool_results_before_next_turn():
+    """工具回灌后刷新工具池,让中途 READY 的 MCP 工具进入下一轮模型请求。"""
+    class _Input(BaseModel):
+        pass
+
+    async def _first(inp: _Input, ctx) -> str:
+        return "first-result"
+
+    async def _second(inp: _Input, ctx) -> str:
+        return "second-result"
+
+    first = Tool(
+        name="first",
+        description="First tool",
+        input_model=_Input,
+        func=_first,
+        is_concurrency_safe=True,
+    )
+    second = Tool(
+        name="mcp__remote__second",
+        description="Second tool",
+        input_model=_Input,
+        func=_second,
+        is_concurrency_safe=True,
+        is_mcp=True,
+        mcp_info={"server_name": "remote", "tool_name": "second"},
+    )
+    provider = _ScriptedProvider([
+        _tool_use_events_async("first", "t1"),
+        _text_events_async("done"),
+    ])
+    seen_tool_names: list[list[str]] = []
+
+    original_stream = provider.stream
+
+    def _recording_stream(**kwargs):
+        seen_tool_names.append([tool.name for tool in kwargs["tools"]])
+        return original_stream(**kwargs)
+
+    provider.stream = _recording_stream
+
+    refresh_calls = 0
+
+    async def _refresh_tools():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        return [first, second]
+
+    params = _params_with(provider)
+    params.tools = [first]
+    params.refresh_tools = _refresh_tools
+    agent_state = _agent_state_hi()
+
+    out = [m async for m in query_loop(agent_state, params, SpyTracer())]
+
+    assert refresh_calls == 1
+    assert seen_tool_names == [["first"], ["first", "mcp__remote__second"]]
+    assert any(
+        isinstance(m, UserMessage)
+        and isinstance(m.content, list)
+        and any(isinstance(b, ToolResultBlock) for b in m.content)
+        for m in agent_state.messages
+    )
+    assert any(isinstance(m, AssistantMessage) for m in out)
