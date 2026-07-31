@@ -17,6 +17,7 @@ from core.file_state import FileStateCache
 
 if TYPE_CHECKING:
     from core.lsp.manager import LSPServerManager
+    from diagnose.session import DiagnosisSession
 
 
 # ── 消息块 ──────────────────────────────────────────
@@ -224,6 +225,15 @@ class AgentState:
     # 主 agent 持有的 LSP manager。forked AgentState 不复制该运行时对象；
     # fork 仍继承 LSP tool schema，但执行时由 can_use_tool 拒绝。
     lsp_manager: LSPServerManager | None = None
+    # 诊断 session: Agent 经诊断控制工具间接操作。configure_diagnosis_agent 之后,
+    # 调用方 build_agent_state 再把 session 赋到这里, 工具从
+    # ToolContext.agent_state.diagnose_session 取 (不再用闭包)。
+    diagnose_session: DiagnosisSession | None = None
+    # 诊断工具的可信执行身份与审查绑定。字段保持扁平，由 workflow 设置，
+    # ToolContext 将同一个 AgentState 传给工具；模型不能通过工具入参伪造。
+    diagnose_actor: Literal["diagnostician", "reviewer"] | None = None
+    diagnose_review_round: int | None = None
+    diagnose_review_revision: int | None = None
 
 
 # ── 常量(对齐真实项目 query.ts) ──

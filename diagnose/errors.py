@@ -69,3 +69,11 @@ class ArtifactNotFoundError(DiagnosisError):
     当 ArtifactRef.path 指向的文件在 root_dir 内不存在时抛出。
     inspect_case 不静默忽略缺失工件, 而是明确报错, 让调用方知道证据包不完整。
     """
+
+
+class InvalidReviewError(DiagnosisError):
+    """审查结构或审查目标与当前 session 状态不一致。"""
+
+
+class StaleReviewError(InvalidReviewError):
+    """审查绑定的 revision 已不是 session 的当前 revision。"""

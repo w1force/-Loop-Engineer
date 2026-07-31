@@ -1,20 +1,21 @@
-"""Java/JVM 占位平台测试 - TDD RED 阶段
+"""Java/JVM runtime profile 平台测试
 
-先写失败测试,锁定 JavaJvmDiagnosticPlatform 的 descriptor 字段、inspect_case
-路径安全与流式 hash 行为、builtin_platform_registry 工厂的显式语义,
-再实现最小代码。
+锁定 JavaJvmDiagnosticPlatform 的 descriptor 字段、inspect_case 路径安全与流式
+hash 行为、builtin_platform_registry 工厂的显式语义, 以及 AVAILABLE runtime
+profile 下的 taxonomy / seed_hypotheses / build_agent_guidance 行为。
 
 覆盖 (对应 brief 验收):
-- descriptor: status=PLANNED, capabilities=[], actions=[], taxonomy 仅含 unknown,
-  artifact_kinds 含 7 种 (不含 UNKNOWN)。
+- descriptor: status=AVAILABLE, capabilities=[], actions=[], taxonomy 含 8 类
+  runtime 根因候选, artifact_kinds 含 7 种 (不含 UNKNOWN)。
 - inspect_case 路径安全: 绝对路径/.. 越界 -> InvalidArtifactPathError (非静默忽略)。
 - inspect_case 文件不存在 -> ArtifactNotFoundError。
 - inspect_case 流式 hash: 分块 (>64KB 文件触发多次 update), size/sha256 正确,
   且不全量 read (用 hashlib.sha256.update 调用次数作为可观测副作用)。
 - inspect_case 保留声明 kind, 不以后缀猜测。
-- seed_hypotheses 返回 []。
+- seed_hypotheses: 依据 artifact kind 生成 PENDING 假设 (可能非空)。
+- build_agent_guidance: 返回 Java runtime 提示正文 (无 <system-reminder> 标签)。
 - builtin_platform_registry: 显式工厂, import 不触发注册, 每次返回新实例。
-- 集成: Java case 经 create_diagnosis_session -> INSUFFICIENT_CAPABILITY。
+- 集成: AVAILABLE Java case 经 create_diagnosis_session -> INCONCLUSIVE (无证据)。
 - 无 execute 方法、无 NotImplementedError。
 """
 
@@ -28,6 +29,7 @@ from diagnose.model import (
     ArtifactRef,
     DiagnosisCase,
     DiagnosisStatus,
+    HypothesisStatus,
     PlatformStatus,
 )
 from diagnose.platform import DiagnosticPlatform
@@ -77,8 +79,8 @@ class TestDescriptor:
     def test_id_is_java_jvm(self):
         assert JavaJvmDiagnosticPlatform().descriptor.id == "java-jvm"
 
-    def test_status_is_planned(self):
-        assert JavaJvmDiagnosticPlatform().descriptor.status == PlatformStatus.PLANNED
+    def test_status_is_available(self):
+        assert JavaJvmDiagnosticPlatform().descriptor.status == PlatformStatus.AVAILABLE
 
     def test_display_name_and_description_non_empty(self):
         d = JavaJvmDiagnosticPlatform().descriptor
@@ -91,10 +93,15 @@ class TestDescriptor:
     def test_actions_empty(self):
         assert JavaJvmDiagnosticPlatform().descriptor.actions == []
 
-    def test_taxonomy_only_unknown(self):
-        tax = JavaJvmDiagnosticPlatform().descriptor.taxonomy
-        assert tax.categories == {}
-        assert tax.unknown_category == "unknown"
+    def test_taxonomy_contains_runtime_categories(self):
+        cats = JavaJvmDiagnosticPlatform().descriptor.taxonomy.categories
+        # 8 类 root-cause 候选
+        for key in ("deadlock", "lock_contention", "memory_retention",
+                    "heap_leak", "cpu_hotspot", "thread_starvation",
+                    "runtime_crash", "inconclusive"):
+            assert key in cats
+        # unknown_category 保持 "unknown", 与 DiagnosisResult.root_cause_category 缺省一致。
+        assert JavaJvmDiagnosticPlatform().descriptor.taxonomy.unknown_category == "unknown"
 
     def test_artifact_kinds_exclude_unknown(self):
         kinds = JavaJvmDiagnosticPlatform().descriptor.artifact_kinds
@@ -310,18 +317,25 @@ class TestInspectCasePathSafety:
 # seed_hypotheses
 # --------------------------------------------------------------------------- #
 class TestSeedHypotheses:
-    def test_returns_empty_list(self, tmp_path):
-        (tmp_path / "app.log").write_bytes(b"x")
-        case = DiagnosisCase(
-            id="c",
-            platform_id="java-jvm",
-            root_dir=str(tmp_path),
-            artifacts=[ArtifactRef(id="a", kind=ArtifactKind.LOG, path="app.log")],
-        )
+    def test_seeds_pending_hypotheses_for_thread_dump(self, tmp_path):
+        (tmp_path / "td.txt").write_text("x")
+        case = DiagnosisCase(id="c", platform_id="java-jvm", root_dir=str(tmp_path),
+                             artifacts=[ArtifactRef(id="td", kind=ArtifactKind.THREAD_SNAPSHOT, path="td.txt")])
         result = JavaJvmDiagnosticPlatform().seed_hypotheses(case)
-        # 必须是 list 且为空 (区分 None / 非空 / 空 list)。
-        assert isinstance(result, list)
-        assert result == []
+        categories = {h.category for h in result}
+        assert {"deadlock", "lock_contention", "cpu_hotspot"} <= categories
+        assert all(h.status == HypothesisStatus.PENDING for h in result)
+
+    def test_seeds_heap_hypotheses_for_heap_dump(self, tmp_path):
+        (tmp_path / "hd.hprof").write_bytes(b"x")
+        case = DiagnosisCase(id="c", platform_id="java-jvm", root_dir=str(tmp_path),
+                             artifacts=[ArtifactRef(id="hd", kind=ArtifactKind.HEAP_SNAPSHOT, path="hd.hprof")])
+        categories = {h.category for h in JavaJvmDiagnosticPlatform().seed_hypotheses(case)}
+        assert {"memory_retention", "heap_leak"} <= categories
+
+    def test_no_hypotheses_for_empty_case(self, tmp_path):
+        case = DiagnosisCase(id="c", platform_id="java-jvm", root_dir=str(tmp_path), artifacts=[])
+        assert JavaJvmDiagnosticPlatform().seed_hypotheses(case) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -333,7 +347,7 @@ class TestBuiltinRegistry:
         assert isinstance(reg, PlatformRegistry)
         d = reg.get("java-jvm").descriptor
         assert d.id == "java-jvm"
-        assert d.status == PlatformStatus.PLANNED
+        assert d.status == PlatformStatus.AVAILABLE
 
     def test_factory_lists_java_jvm(self):
         reg = builtin_platform_registry()
@@ -365,30 +379,21 @@ class TestBuiltinRegistry:
 
 
 # --------------------------------------------------------------------------- #
-# 集成: create_diagnosis_session -> INSUFFICIENT_CAPABILITY
+# 集成: create_diagnosis_session -> INCONCLUSIVE (AVAILABLE 无证据)
 # --------------------------------------------------------------------------- #
 class TestJavaCaseSessionIntegration:
-    def test_java_case_yields_insufficient_capability(self, tmp_path):
+    def test_java_case_yields_inconclusive_when_available(self, tmp_path):
         from diagnose.api import create_diagnosis_session
 
-        log = tmp_path / "app.log"
-        log.write_bytes(b"OutOfMemoryError")
-        case = DiagnosisCase(
-            id="case-java-1",
-            platform_id="java-jvm",
-            root_dir=str(tmp_path),
-            artifacts=[
-                ArtifactRef(id="a-log", kind=ArtifactKind.LOG, path="app.log")
-            ],
-        )
-        reg = builtin_platform_registry()
-        session = create_diagnosis_session(case, reg)
-
+        (tmp_path / "app.log").write_bytes(b"x")
+        case = DiagnosisCase(id="case-java-1", platform_id="java-jvm", root_dir=str(tmp_path),
+                             artifacts=[ArtifactRef(id="a-log", kind=ArtifactKind.LOG, path="app.log")])
+        session = create_diagnosis_session(case, builtin_platform_registry())
         result = session.build_result()
-        # PLANNED 平台 -> INSUFFICIENT_CAPABILITY (非 COMPLETE, 非异常)。
-        assert result.status == DiagnosisStatus.INSUFFICIENT_CAPABILITY
+        # AVAILABLE 平台不再返回 INSUFFICIENT_CAPABILITY; 无证据 -> INCONCLUSIVE
+        assert result.status == DiagnosisStatus.INCONCLUSIVE
         assert result.root_cause is None
-        assert len(result.missing_capabilities) > 0
+        assert result.missing_capabilities == []
 
     def test_session_carries_inspected_artifacts(self, tmp_path):
         """inspect_case 补全的 size/sha256 应进入 session.case.artifacts。"""
@@ -411,3 +416,18 @@ class TestJavaCaseSessionIntegration:
         assert len(arts) == 1
         assert arts[0].size_bytes == len(data)
         assert arts[0].sha256 == _sha256_bytes(data)
+
+
+# --------------------------------------------------------------------------- #
+# build_agent_guidance (基类成员 override; agent.py 直接调用)
+# --------------------------------------------------------------------------- #
+class TestBuildAgentGuidance:
+    def test_guidance_returns_text_with_methodology(self, tmp_path):
+        (tmp_path / "td.txt").write_text("x")
+        case = DiagnosisCase(id="c", platform_id="java-jvm", root_dir=str(tmp_path),
+                             artifacts=[ArtifactRef(id="td", kind=ArtifactKind.THREAD_SNAPSHOT, path="td.txt")])
+        txt = JavaJvmDiagnosticPlatform().build_agent_guidance(case)
+        # 方法论保留 (BLOCKED≠deadlock), MCP 工具名不进 guidance
+        assert "BLOCKED" in txt or "deadlock" in txt.lower()
+        assert "parse_log" not in txt
+        assert "<system-reminder>" not in txt

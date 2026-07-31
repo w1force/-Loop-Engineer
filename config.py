@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     api_key: str = ""
     base_url: str = "https://api.anthropic.com"
     model: str = "claude-sonnet-4-6"
+    review_model: str | None = None  # None 时 reviewer 复用 model
+    diagnosis_max_rework_rounds: int = 1
     max_tokens: int = 4096
     max_turns: int = 20
     debug_sse: bool = False  # LOOP_ENGINEER_DEBUG_SSE=true 时打印原始 SSE 流

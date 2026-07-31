@@ -1,59 +1,66 @@
-"""结论校验器
+"""语言无关的结论提案与证据引用校验。"""
+from __future__ import annotations
 
-ClaimValidator.normalize 校验 claim 引用的证据,对无证据支撑的 validated 结论降级。
-
-降级规则 (来自 plan S5.3 + Task 3 brief):
-- validated + evidence_ids 为空 -> 降级 unvalidated,note 说明缺证据。
-- validated + 引用 catalog 中不存在的 ID -> 降级 unvalidated,note 指明缺失 ID。
-- validated + 全部 ID 存在 -> 原样保留,validation_note 置 None。
-- unvalidated -> 原样保留 (不升级)。
-
-降级原因写入 claim.validation_note,跟着 claim 走,不另造 note 类型。
-"""
+from pydantic import BaseModel
 
 from diagnose.catalog import EvidenceCatalog
-from diagnose.model import Claim, ClaimStatus
-
-_NO_EVIDENCE_NOTE = "validated claim has no evidence references"
+from diagnose.model import ClaimProposal, DiagnosisCase, DiagnosticTaxonomy
 
 
-class ClaimValidator:
-    """结论校验器
+class ValidationIssue(BaseModel):
+    code: str
+    message: str
+    target_id: str | None = None
+    blocking: bool = True
 
-    将 validated claim 与 EvidenceCatalog 对照,降级无证据或引用不存在证据的结论。
-    校验器无状态,normalize 返回 (可能新建的) Claim,不修改入参的语义字段。
-    """
 
-    def normalize(self, claim: Claim, catalog: EvidenceCatalog) -> Claim:
-        """归一化 claim。
+class ClaimProposalValidator:
+    """只检查可确定的引用、分类和工件边界，不解析自然语言 statement。"""
 
-        validated claim 若证据不充分或引用不存在,降级为 unvalidated 并写入
-        validation_note;证据充分则保留 status 并清空 note。
-        unvalidated claim 原样返回 (不做升级)。
-        """
-        if claim.status != ClaimStatus.VALIDATED:
-            return claim
+    def validate(
+        self,
+        proposal: ClaimProposal,
+        *,
+        catalog: EvidenceCatalog,
+        case: DiagnosisCase,
+        taxonomy: DiagnosticTaxonomy,
+    ) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        if proposal.category not in taxonomy.categories:
+            issues.append(self._issue("unknown_category", f"unknown claim category: {proposal.category!r}", proposal.id))
+        if not proposal.evidence_ids:
+            issues.append(self._issue("missing_evidence", "claim proposal has no evidence references", proposal.id))
+        if len(proposal.evidence_ids) != len(set(proposal.evidence_ids)):
+            issues.append(self._issue("duplicate_evidence", "claim proposal contains duplicate evidence references", proposal.id))
+        missing_evidence = [eid for eid in proposal.evidence_ids if catalog.get(eid) is None]
+        if missing_evidence:
+            issues.append(self._issue("unknown_evidence", "claim proposal references missing evidence: " + ", ".join(missing_evidence), proposal.id))
 
-        if not claim.evidence_ids:
-            return claim.model_copy(
-                update={
-                    "status": ClaimStatus.UNVALIDATED,
-                    "validation_note": _NO_EVIDENCE_NOTE,
-                }
-            )
+        known_artifacts = {artifact.id for artifact in case.artifacts}
+        unknown_artifacts = sorted(set(proposal.artifact_ids) - known_artifacts)
+        if unknown_artifacts:
+            issues.append(self._issue("unknown_artifact", "claim proposal references unknown artifacts: " + ", ".join(unknown_artifacts), proposal.id))
+        if len(proposal.artifact_ids) != len(set(proposal.artifact_ids)):
+            issues.append(self._issue("duplicate_artifact", "claim proposal contains duplicate artifact references", proposal.id))
 
-        missing = [eid for eid in claim.evidence_ids if catalog.get(eid) is None]
-        if missing:
-            return claim.model_copy(
-                update={
-                    "status": ClaimStatus.UNVALIDATED,
-                    "validation_note": (
-                        "validated claim references missing evidence: " + ", ".join(missing)
-                    ),
-                }
-            )
+        referenced_artifacts: set[str] = set()
+        for evidence_id in proposal.evidence_ids:
+            record = catalog.get(evidence_id)
+            if record is not None:
+                referenced_artifacts.update(record.artifact_ids)
+        if referenced_artifacts and not referenced_artifacts.issubset(set(proposal.artifact_ids)):
+            missing = sorted(referenced_artifacts - set(proposal.artifact_ids))
+            required = sorted(referenced_artifacts)
+            issues.append(self._issue(
+                "artifact_evidence_mismatch",
+                "claim proposal omits artifacts used by evidence: "
+                + ", ".join(missing)
+                + "; set artifact_ids to cover the referenced-evidence union: "
+                + ", ".join(required),
+                proposal.id,
+            ))
+        return issues
 
-        # 全部存在: 原样保留 status,清空 validation_note
-        if claim.validation_note is None:
-            return claim
-        return claim.model_copy(update={"validation_note": None})
+    @staticmethod
+    def _issue(code: str, message: str, target_id: str) -> ValidationIssue:
+        return ValidationIssue(code=code, message=message, target_id=target_id)

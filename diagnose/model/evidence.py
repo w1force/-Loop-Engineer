@@ -3,9 +3,46 @@
 包含 EvidenceLocation、EvidenceDraft 和 EvidenceRecord。
 """
 
+from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class FindingOutcome(str, Enum):
+    """证据直接观察到的极性，不表达诊断是否已被确认。"""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+class EvidenceFinding(BaseModel):
+    """供语言无关校验消费的标准化证据观察。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(
+        min_length=1,
+        description="平台定义的直接观察类型，例如 monitor_contention。",
+    )
+    outcome: FindingOutcome = Field(
+        description=(
+            "观察极性：present=明确观察到，absent=明确未观察到，"
+            "unknown=证据无法判断。禁止使用 confirmed/validated/suspected。"
+        )
+    )
+    scope: str = Field(
+        min_length=1,
+        description="该观察成立的证据范围，例如 thread_snapshot 或 heap_snapshot。",
+    )
+    details: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "该观察的结构化数字、对象、线程或工具结果细节；"
+            "原始输出片段仍应放在 evidence.data。"
+        ),
+    )
 
 
 class EvidenceLocation(BaseModel):
@@ -32,6 +69,7 @@ class EvidenceDraft(BaseModel):
     artifact_ids: list[str]
     analyzer_id: str
     summary: str
+    finding: EvidenceFinding | None = None
     locations: list[EvidenceLocation] = Field(default_factory=list)
     data: dict[str, Any] = Field(default_factory=dict)
     confidence: float | None = Field(default=None, ge=0, le=1)

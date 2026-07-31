@@ -84,8 +84,10 @@ class TestAppendAssignsSequentialIds:
         catalog = EvidenceCatalog()
         catalog.append([_draft("d1")])
         catalog.append([_draft("d2")])
-        assert catalog.get("EVD-0001").dedup_key == "d1"
-        assert catalog.get("EVD-0002").dedup_key == "d2"
+        first = catalog.get("EVD-0001")
+        second = catalog.get("EVD-0002")
+        assert first is not None and first.dedup_key == "d1"
+        assert second is not None and second.dedup_key == "d2"
 
     def test_records_preserve_draft_content(self):
         from diagnose.catalog import EvidenceCatalog
@@ -222,7 +224,8 @@ class TestConflictRejection:
             catalog.append([_draft("d1", summary="changed")])
 
         assert len(catalog.all()) == 1
-        assert catalog.get("EVD-0001").summary == "original"
+        remaining = catalog.get("EVD-0001")
+        assert remaining is not None and remaining.summary == "original"
         # 原对象未被替换
         assert catalog.get("EVD-0001") is original
 

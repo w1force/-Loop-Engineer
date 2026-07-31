@@ -19,12 +19,13 @@ from diagnose.model import (
     Hypothesis,
     PlatformStatus,
 )
+from diagnose.platform import DiagnosticPlatform
 
 
 # --------------------------------------------------------------------------- #
 # 测试用纯内存平台实现
 # --------------------------------------------------------------------------- #
-class FakePlatform:
+class FakePlatform(DiagnosticPlatform):
     """纯内存 DiagnosticPlatform 实现,仅用于测试。
 
     不依赖任何外部资源;inspect_case 原样返回 case.artifacts,seed_hypotheses 返回空。
@@ -92,41 +93,47 @@ class TestImportsAndErrors:
 # --------------------------------------------------------------------------- #
 # DiagnosticPlatform Protocol 契约
 # --------------------------------------------------------------------------- #
-class TestProtocolContract:
-    """验证 DiagnosticPlatform Protocol 的三成员契约。"""
+class TestPlatformContract:
+    """验证 DiagnosticPlatform 基类 (ABC) 契约。"""
 
-    def test_protocol_has_three_members(self):
+    def test_platform_member_set(self):
         from diagnose.platform import DiagnosticPlatform
 
-        # 只看公开成员 (过滤 dunder 与下划线前缀), 锁死业务成员集合:
-        # descriptor / inspect_case / seed_hypotheses, 不允许多也不允许少。
-        # 注意: 本断言只查 DiagnosticPlatform.__dict__ 自身成员;
-        # 未来 ExecutableDiagnosticPlatform 继承基础 Protocol 并新增成员时, 需扩展此断言。
+        # 公开成员 (基类自身 __dict__): 3 个 abstract (descriptor/inspect_case/
+        # seed_hypotheses) + 2 个具体 (validate_claim_proposal / build_agent_guidance,
+        # 均带基类默认); 不含 execute。
+        # 未来 ExecutableDiagnosticPlatform 继承基类并新增成员时, 需扩展此断言。
         public_members = {
             name for name in DiagnosticPlatform.__dict__ if not name.startswith("_")
         }
-        assert public_members == {"descriptor", "inspect_case", "seed_hypotheses"}
+        assert public_members == {
+            "descriptor",
+            "inspect_case",
+            "seed_hypotheses",
+            "validate_claim_proposal",
+            "build_agent_guidance",
+        }
 
-    def test_protocol_does_not_define_execute(self):
+    def test_platform_does_not_define_execute(self):
         from diagnose.platform import DiagnosticPlatform
 
-        # 基础协议绝不含 execute
+        # 基类绝不含 execute
         assert not hasattr(DiagnosticPlatform, "execute")
 
-    def test_fake_platform_satisfies_protocol(self):
+    def test_fake_platform_is_diagnostic_platform(self):
         from diagnose.platform import DiagnosticPlatform
 
         platform = FakePlatform(_make_descriptor())
-        # runtime_checkable: isinstance 检查成员存在性
+        # 名义继承: FakePlatform(DiagnosticPlatform), isinstance 不靠 duck-type。
         assert isinstance(platform, DiagnosticPlatform)
 
-    def test_protocol_is_a_typing_protocol(self):
-        from typing import Protocol
+    def test_platform_is_an_abc(self):
+        from abc import ABC
 
         from diagnose.platform import DiagnosticPlatform
 
-        # DiagnosticPlatform 应继承自 typing.Protocol (或 runtime_checkable 包装后仍为 Protocol 子类)
-        assert issubclass(DiagnosticPlatform, Protocol)
+        # DiagnosticPlatform 是 ABC (具体平台显式继承, 名义子类型; 非 typing.Protocol)。
+        assert issubclass(DiagnosticPlatform, ABC)
 
 
 # --------------------------------------------------------------------------- #

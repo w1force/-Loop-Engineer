@@ -70,7 +70,7 @@ class AgentConfig:
     tools: list[Tool] = field(default_factory=list)
     can_use_tool: Callable = default_can_use_tool
     max_budget_usd: float | None = None
-    transcript_path: str = "transcript.jsonl"
+    transcript_path: str = "run.transcript.jsonl"
     tool_execution_mode: Literal["streaming", "batch"] = "streaming"
     skill_dirs: list[str] = field(default_factory=lambda: ["skills/"])
     cwd: str = field(default_factory=os.getcwd)   # ★ Task 4 新增
@@ -170,7 +170,7 @@ def _rough_cost(input_tokens: int, output_tokens: int) -> float:
 
 async def _traced_query_loop(
     agent_state: AgentState, params: QueryParams, tracer: Tracer
-) -> AsyncIterator[Message | StreamEvent | Tombstone]:
+) -> AsyncIterator[Message | StreamEvent | Tombstone | Terminal]:
     """query_loop 的错误兜底包装:冒泡的未捕获异常落 run.jsonl(RUN_ERROR)后再抛。
 
     纯透传:yield 上游每条消息,语义不变;仅在抛异常时补一条 RUN_ERROR 埋点,

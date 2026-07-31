@@ -1,167 +1,70 @@
-"""ClaimValidator 测试 - TDD RED 阶段
-
-先写失败测试,锁定 ClaimValidator.normalize 的降级行为,再实现最小代码。
-
-覆盖:
-- validated + 空证据 -> 降级 unvalidated,note 非空
-- validated + 引用不存在 ID -> 降级 unvalidated,note 含缺失 ID
-- validated + 全部存在 -> 原样保留,note 置 None
-- unvalidated -> 原样保留 (不升级)
-- 多证据部分缺失 -> 降级并指明缺失 ID
-"""
-
-import pytest
-
+"""ClaimProposalValidator 的语言无关确定性校验。"""
 from diagnose.catalog import EvidenceCatalog
-from diagnose.model import Claim, ClaimStatus, EvidenceDraft
-from diagnose.validation import ClaimValidator
+from diagnose.model import (
+    ArtifactKind,
+    ArtifactRef,
+    ClaimProposal,
+    DiagnosisCase,
+    DiagnosticTaxonomy,
+    EvidenceDraft,
+)
+from diagnose.validation import ClaimProposalValidator, ValidationIssue
 
 
-def _validated_claim(
-    evidence_ids: list[str] | None = None,
-    note: str | None = None,
-) -> Claim:
-    return Claim(
-        id="c1",
-        statement="stmt",
-        status=ClaimStatus.VALIDATED,
-        evidence_ids=evidence_ids if evidence_ids is not None else [],
-        validation_note=note,
+def _case() -> DiagnosisCase:
+    return DiagnosisCase(
+        id="c", platform_id="p", root_dir="/tmp",
+        artifacts=[ArtifactRef(id="a1", kind=ArtifactKind.LOG, path="x")],
     )
 
 
-def _unvalidated_claim(note: str | None = None) -> Claim:
-    return Claim(
-        id="c2",
-        statement="stmt",
-        status=ClaimStatus.UNVALIDATED,
-        evidence_ids=[],
-        validation_note=note,
-    )
+def _catalog() -> EvidenceCatalog:
+    catalog = EvidenceCatalog()
+    catalog.append([EvidenceDraft(dedup_key="d", platform_id="p", artifact_ids=["a1"], analyzer_id="a", summary="s")])
+    return catalog
 
 
-def _catalog_with_n(n: int) -> EvidenceCatalog:
-    """构造已登记 n 条证据 (EVD-0001..EVD-000n) 的 catalog。"""
-    cat = EvidenceCatalog()
-    cat.append([
-        EvidenceDraft(
-            dedup_key=f"d{i}",
-            platform_id="java-jvm",
-            artifact_ids=["a1"],
-            analyzer_id="an",
-            summary=f"s{i}",
-        )
-        for i in range(n)
-    ])
-    return cat
+def _proposal(**changes: object) -> ClaimProposal:
+    values: dict[str, object] = {
+        "id": "p1",
+        "category": "cat",
+        "statement": "The result wording is irrelevant.",
+        "evidence_ids": ["EVD-0001"],
+        "artifact_ids": ["a1"],
+    }
+    values.update(changes)
+    return ClaimProposal.model_validate(values)
 
 
-# --------------------------------------------------------------------------- #
-# 导入
-# --------------------------------------------------------------------------- #
-class TestImports:
-    def test_imports(self):
-        from diagnose.validation import ClaimValidator
-
-        assert ClaimValidator is not None
+def _codes(proposal: ClaimProposal) -> set[str]:
+    return {issue.code for issue in ClaimProposalValidator().validate(
+        proposal, catalog=_catalog(), case=_case(), taxonomy=DiagnosticTaxonomy(categories={"cat": "test"})
+    )}
 
 
-# --------------------------------------------------------------------------- #
-# validated + 空证据 -> 降级
-# --------------------------------------------------------------------------- #
-class TestValidatedNoEvidence:
-    def test_validated_empty_evidence_degrades_to_unvalidated(self):
-        cat = EvidenceCatalog()
-        result = ClaimValidator().normalize(_validated_claim(evidence_ids=[]), cat)
-        assert result.status == ClaimStatus.UNVALIDATED
-
-    def test_validated_empty_evidence_note_non_empty(self):
-        cat = EvidenceCatalog()
-        result = ClaimValidator().normalize(_validated_claim(evidence_ids=[]), cat)
-        assert result.validation_note is not None
-        assert len(result.validation_note) > 0
+def test_validation_issue_is_structured():
+    issue = ValidationIssue(code="x", message="y")
+    assert issue.blocking is True
 
 
-# --------------------------------------------------------------------------- #
-# validated + 引用不存在 ID -> 降级
-# --------------------------------------------------------------------------- #
-class TestValidatedUnknownEvidence:
-    def test_validated_unknown_evidence_degrades(self):
-        cat = _catalog_with_n(1)
-        result = ClaimValidator().normalize(
-            _validated_claim(evidence_ids=["EVD-9999"]), cat
-        )
-        assert result.status == ClaimStatus.UNVALIDATED
-
-    def test_validated_unknown_evidence_note_contains_id(self):
-        cat = _catalog_with_n(1)
-        result = ClaimValidator().normalize(
-            _validated_claim(evidence_ids=["EVD-9999"]), cat
-        )
-        assert result.validation_note is not None
-        assert "EVD-9999" in result.validation_note
+def test_valid_proposal_does_not_depend_on_statement_wording():
+    assert _codes(_proposal(statement="no deadlock exists")) == set()
 
 
-# --------------------------------------------------------------------------- #
-# validated + 全部存在 -> 原样保留
-# --------------------------------------------------------------------------- #
-class TestValidatedAllPresent:
-    def test_validated_all_present_keeps_status(self):
-        cat = _catalog_with_n(2)
-        result = ClaimValidator().normalize(
-            _validated_claim(evidence_ids=["EVD-0001", "EVD-0002"]), cat
-        )
-        assert result.status == ClaimStatus.VALIDATED
-
-    def test_validated_all_present_clears_note(self):
-        """validated + 全有效 -> validation_note 置 None (即使原本有 note)。"""
-        cat = _catalog_with_n(1)
-        result = ClaimValidator().normalize(
-            _validated_claim(evidence_ids=["EVD-0001"], note="stale note"), cat
-        )
-        assert result.validation_note is None
+def test_missing_evidence_is_rejected():
+    assert "missing_evidence" in _codes(_proposal(evidence_ids=[]))
 
 
-# --------------------------------------------------------------------------- #
-# unvalidated -> 原样保留
-# --------------------------------------------------------------------------- #
-class TestUnvalidated:
-    def test_unvalidated_preserved(self):
-        cat = _catalog_with_n(1)
-        result = ClaimValidator().normalize(_unvalidated_claim(), cat)
-        assert result.status == ClaimStatus.UNVALIDATED
-
-    def test_unvalidated_not_upgraded_even_with_evidence(self):
-        """unvalidated 即使引用了存在的证据,也不升级为 validated。"""
-        cat = _catalog_with_n(1)
-        claim = Claim(
-            id="c",
-            statement="s",
-            status=ClaimStatus.UNVALIDATED,
-            evidence_ids=["EVD-0001"],
-        )
-        result = ClaimValidator().normalize(claim, cat)
-        assert result.status == ClaimStatus.UNVALIDATED
+def test_unknown_evidence_is_rejected():
+    assert "unknown_evidence" in _codes(_proposal(evidence_ids=["EVD-9999"]))
 
 
-# --------------------------------------------------------------------------- #
-# 多证据部分缺失
-# --------------------------------------------------------------------------- #
-class TestPartialMissing:
-    def test_partial_missing_degrades(self):
-        cat = _catalog_with_n(1)
-        result = ClaimValidator().normalize(
-            _validated_claim(evidence_ids=["EVD-0001", "EVD-8888"]), cat
-        )
-        assert result.status == ClaimStatus.UNVALIDATED
+def test_unknown_category_and_artifact_are_rejected():
+    assert "unknown_category" in _codes(_proposal(category="other"))
+    assert "unknown_artifact" in _codes(_proposal(artifact_ids=["other"]))
 
-    def test_partial_missing_note_contains_missing_id_only(self):
-        cat = _catalog_with_n(1)
-        result = ClaimValidator().normalize(
-            _validated_claim(evidence_ids=["EVD-0001", "EVD-8888"]), cat
-        )
-        assert result.validation_note is not None
-        # 指明缺失的 ID
-        assert "EVD-8888" in result.validation_note
-        # 不把存在的 ID 误报为缺失
-        assert "EVD-0001" not in result.validation_note
+
+def test_duplicate_ids_and_artifact_evidence_mismatch_are_rejected():
+    assert "duplicate_evidence" in _codes(_proposal(evidence_ids=["EVD-0001", "EVD-0001"]))
+    assert "duplicate_artifact" in _codes(_proposal(artifact_ids=["a1", "a1"]))
+    assert "artifact_evidence_mismatch" in _codes(_proposal(artifact_ids=[]))

@@ -6,7 +6,7 @@
 # Enum
 from diagnose.model.case import ArtifactKind
 from diagnose.model.platform import PlatformStatus
-from diagnose.model.hypothesis import HypothesisStatus, ClaimStatus
+from diagnose.model.hypothesis import EvidenceTimeBasis, HypothesisStatus, ClaimStatus
 from diagnose.model.result import DiagnosisStatus
 
 # Case & Artifact
@@ -20,10 +20,30 @@ from diagnose.model.platform import DiagnosticTaxonomy, DiagnosticPlatformDescri
 from diagnose.model.plan import AnalysisActionRequest, ActionInvocation, DiagnosisPlan
 
 # Evidence
-from diagnose.model.evidence import EvidenceLocation, EvidenceDraft, EvidenceRecord
+from diagnose.model.evidence import (
+    EvidenceDraft,
+    EvidenceFinding,
+    EvidenceLocation,
+    EvidenceRecord,
+    FindingOutcome,
+)
 
 # Hypothesis
-from diagnose.model.hypothesis import Hypothesis, Claim
+from diagnose.model.hypothesis import Hypothesis, Claim, ClaimProposal
+
+# Review
+from diagnose.model.review import (
+    DiagnosisReview,
+    DiagnosisReviewPolicy,
+    ProposalReview,
+    ProposalReviewVerdict,
+    ReviewCycle,
+    ReviewDecision,
+    ReviewFinding,
+    ReviewMode,
+    ReviewSeverity,
+    UnresolvedReviewAction,
+)
 
 # Result
 from diagnose.model.result import DiagnosisResult
@@ -35,6 +55,7 @@ __all__ = [
     "HypothesisStatus",
     "ClaimStatus",
     "DiagnosisStatus",
+    "EvidenceTimeBasis",
     # Case & Artifact
     "ArtifactRef",
     "DiagnosisCase",
@@ -51,9 +72,23 @@ __all__ = [
     "EvidenceLocation",
     "EvidenceDraft",
     "EvidenceRecord",
+    "EvidenceFinding",
+    "FindingOutcome",
     # Hypothesis
     "Hypothesis",
     "Claim",
+    "ClaimProposal",
+    # Review
+    "DiagnosisReview",
+    "DiagnosisReviewPolicy",
+    "ProposalReview",
+    "ProposalReviewVerdict",
+    "ReviewCycle",
+    "ReviewDecision",
+    "ReviewFinding",
+    "ReviewMode",
+    "ReviewSeverity",
+    "UnresolvedReviewAction",
     # Result
     "DiagnosisResult",
 ]

@@ -273,7 +273,12 @@ class TestActionInvocation:
     def test_all_status_values(self):
         from diagnose.model import ActionInvocation
 
-        for status in ["completed", "cached", "rejected", "failed"]:
+        from typing import Literal
+
+        statuses: tuple[Literal["completed", "cached", "rejected", "failed"], ...] = (
+            "completed", "cached", "rejected", "failed"
+        )
+        for status in statuses:
             inv = ActionInvocation(
                 id=f"inv-{status}",
                 action_id="test.action",
@@ -436,6 +441,7 @@ class TestHypothesis:
         assert hyp.status == HypothesisStatus.PENDING  # 默认值
         assert hyp.supporting_evidence_ids == []
         assert hyp.contradicting_evidence_ids == []
+        assert hyp.inconclusive_evidence_ids == []
         assert hyp.next_action_ids == []
 
     def test_full_creation(self):
@@ -448,11 +454,13 @@ class TestHypothesis:
             status=HypothesisStatus.SUPPORTED,
             supporting_evidence_ids=["evd-1", "evd-2"],
             contradicting_evidence_ids=["evd-3"],
+            inconclusive_evidence_ids=["evd-4"],
             next_action_ids=["action-1"]
         )
         assert hyp.status == HypothesisStatus.SUPPORTED
         assert len(hyp.supporting_evidence_ids) == 2
         assert len(hyp.contradicting_evidence_ids) == 1
+        assert len(hyp.inconclusive_evidence_ids) == 1
 
 
 class TestClaim:
@@ -463,6 +471,7 @@ class TestClaim:
 
         claim = Claim(
             id="claim-1",
+            category="memory_retention",
             statement="内存泄漏发生在 ByteBuffer 缓冲区",
             status=ClaimStatus.VALIDATED
         )
@@ -477,6 +486,7 @@ class TestClaim:
         # 正常范围
         claim = Claim(
             id="claim-2",
+            category="resource_leak",
             statement="存在资源泄漏",
             status=ClaimStatus.UNVALIDATED,
             confidence=0.75
@@ -487,6 +497,7 @@ class TestClaim:
         with pytest.raises(ValidationError):
             Claim(
                 id="claim-3",
+                category="test",
                 statement="test",
                 status=ClaimStatus.VALIDATED,
                 confidence=1.2
@@ -497,6 +508,7 @@ class TestClaim:
 
         claim = Claim(
             id="claim-3",
+            category="lock_contention",
             statement="线程阻塞在 I/O 操作",
             status=ClaimStatus.VALIDATED,
             evidence_ids=["evd-1"],
@@ -524,6 +536,7 @@ class TestDiagnosisResult:
         assert result.causal_chain == []
         assert result.validated_claims == []
         assert result.unvalidated_claims == []
+        assert result.claim_proposals == []
         assert result.hypotheses == []
         assert result.evidence == []
         assert result.invocations == []
@@ -542,10 +555,10 @@ class TestDiagnosisResult:
             root_cause="ByteBuffer 直接缓冲区未释放",
             causal_chain=["大量直接缓冲区创建", "堆外内存泄漏", "OOM"],
             validated_claims=[
-                Claim(id="c-1", statement="堆外内存占用高", status=ClaimStatus.VALIDATED)
+                Claim(id="c-1", category="memory_retention", statement="堆外内存占用高", status=ClaimStatus.VALIDATED)
             ],
             unvalidated_claims=[
-                Claim(id="c-2", statement="NIO 通道泄漏", status=ClaimStatus.UNVALIDATED)
+                Claim(id="c-2", category="resource_leak", statement="NIO 通道泄漏", status=ClaimStatus.UNVALIDATED)
             ],
             hypotheses=[
                 Hypothesis(id="h-1", category="memory", statement="存在堆外内存泄漏")
@@ -669,7 +682,7 @@ def test_json_roundtrip_all_models():
             analyzer_id="an1", summary="test", id="EVD-1"
         ),
         Hypothesis(id="h1", category="test", statement="test"),
-        Claim(id="cl1", statement="test", status=ClaimStatus.VALIDATED),
+        Claim(id="cl1", category="test", statement="test", status=ClaimStatus.VALIDATED),
         DiagnosisResult(
             case_id="c1", platform_id="p1", status=DiagnosisStatus.COMPLETE
         ),

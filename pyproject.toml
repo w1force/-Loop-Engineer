@@ -30,6 +30,10 @@ package = false
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+  "integration: requires external processes, excluded from the default test run",
+]
 
 [tool.pyright]
 typeCheckingMode = "basic"

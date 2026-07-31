@@ -108,7 +108,7 @@ sequenceDiagram
     Platform->>Tool: execute structured analysis
     Tool-->>Catalog: EvidenceRecord
     Catalog-->>Core: stable evidence IDs and summaries
-    Core->>Agent: observations only, not raw large dumps
+    Core->>Agent: registered evidence summaries, not raw large dumps
     Agent->>Core: propose/validate claim
     Core->>Core: claim-to-evidence validation
     Core-->>Caller: DiagnosisResult
@@ -667,3 +667,36 @@ class ExecutableDiagnosticPlatform(DiagnosticPlatform, Protocol):
 - 不让模型直接读完整 heap dump 或以自由文本认定根因。
 - 不在平台目录内部再引入 `service/impl` 分层；稳定的 service contract 已在 `diagnose/`，具体实现只在 `diagnose/platform_impl/<platform_id>/`。
 - 不引入 repository/DAO 结构；当前没有持久化数据库，JSON 仍由调用方或后续 case storage 决定。
+
+## 11. Agent/MCP 集成修订
+
+诊断产品由 Agent 主导。具体 MCP 和 core 工具直接进入 Agent 的工具池，保留 MCP
+自身的工具描述、参数 schema 和可替换性；`diagnose` 不把它们改名或映射成一套 JVM
+专用 action。
+
+```text
+Agent 直接调用 MCP/core 分析工具
+  -> Agent 基于工具输出判断哪些发现值得纳入证据链
+  -> Agent 用 CaptureDiagnosisEvidence 将发现、关键输出和 case artifact 关联
+  -> EvidenceCatalog 登记 EVD-*
+  -> Agent 更新假设、提交 claim
+  -> FinalizeDiagnosis 检查证据状态，而非检查是否调用了某个固定 MCP 工具
+```
+
+稳定诊断控制工具：
+
+- `GetDiagnosisContext`
+- `CaptureDiagnosisEvidence`
+- `ReadDiagnosisEvidence`
+- `UpdateDiagnosisHypothesis`
+- `SubmitDiagnosisClaim`
+- `FinalizeDiagnosis`
+
+`FinalizeDiagnosis` 的闸门不能要求“调用完整工具集”。它只要求：确定性 claim 必须
+引用当前 case 的 EVD；平台语义规则不得被违反。
+这使 MCP server 或具体 tool 更换时，诊断流程和证据链保持稳定。
+
+Java/JVM 平台在此模型中的职责是轻量 profile：artifact 校验、taxonomy、调查规则和
+claim 语义校验。例如 `BLOCKED` 不等于 deadlock，单份 heap histogram 不等于 heap leak。
+它不要求自行实现 HPROF 或 thread dump 的完整解析器；优先复用 Agent 直接调用的 MCP/
+core 工具，只有在工具缺失时才新增专用分析实现。

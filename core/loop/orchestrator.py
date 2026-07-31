@@ -68,7 +68,7 @@ def _emit_transition(tracer: Tracer, transition) -> None:
 
 async def query_loop(
     agent_state: AgentState, params: QueryParams, tracer: Tracer
-) -> AsyncIterator[Message | StreamEvent | Tombstone]:
+) -> AsyncIterator[Message | StreamEvent | Tombstone | Terminal]:
     """内层 agentic loop。stream_turn 流式 + tombstone 通知下游失败轮。
 
     agent_state.messages 是唯一消息源;QueryState 仅保存单次 loop 的轮次和恢复状态。

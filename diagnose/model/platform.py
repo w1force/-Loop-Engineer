@@ -15,7 +15,7 @@ class PlatformStatus(str, Enum):
     """平台状态枚举"""
 
     PLANNED = "planned"  # 已知平台但没有可执行分析能力
-    AVAILABLE = "available"  # 可选择并执行至少一个分析动作
+    AVAILABLE = "available"  # 具备可运行的诊断 profile、工件规则、Agent 调查路径和外部分析工具接入
     DISABLED = "disabled"  # 已注册但被配置关闭
 
 

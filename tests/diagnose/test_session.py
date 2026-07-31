@@ -72,7 +72,7 @@ def _descriptor(
     )
 
 
-class FakeExecutablePlatform:
+class FakeExecutablePlatform(DiagnosticPlatform):
     """带 execute 方法的 fake 平台 (超出 Protocol),用于断言一期不调用 execute。
 
     inspect_case 原样返回 case.artifacts;seed_hypotheses 返回构造时给定的列表。
@@ -357,6 +357,7 @@ class TestRunActionStateMachine:
 
         inv = session.run_action(AnalysisActionRequest(action_id="act-heap"))
         assert inv.status == "rejected"
+        assert inv.reason is not None
         # 验证 reason 包含缺失的 artifact kinds 信息（枚举 value 为小写下划线格式）
         assert "missing required artifact kinds" in inv.reason
         assert "heap_snapshot" in inv.reason
@@ -559,3 +560,31 @@ class TestBuildResult:
 
         result = session.build_result()
         assert len(result.invocations) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# get_context
+# --------------------------------------------------------------------------- #
+class TestGetContext:
+    """get_context: artifact 额外带 absolute_path (供需绝对路径的 MCP 工具)。"""
+
+    def test_artifact_includes_absolute_path(self, tmp_path):
+        # absolute_path 属 case-specific 可变信息, 走 GetDiagnosisContext (这里),
+        # 不进被 <system-reminder> 包的平台 guidance 稳定块。
+        from diagnose.api import create_diagnosis_session
+
+        (tmp_path / "app.log").write_text("x")
+        case = DiagnosisCase(
+            id="c",
+            platform_id="fake",
+            root_dir=str(tmp_path),
+            artifacts=[ArtifactRef(id="a-log", kind=ArtifactKind.LOG, path="app.log")],
+        )
+        platform = FakeExecutablePlatform(_descriptor(status=PlatformStatus.AVAILABLE))
+        session = create_diagnosis_session(case, _registry_with(platform))
+
+        ctx = session.get_context()
+        art = ctx["artifacts"][0]
+        assert art["absolute_path"] == str((tmp_path / "app.log").resolve())
+        # 相对 path 仍保留 (ArtifactRef 原字段不变)
+        assert art["path"] == "app.log"

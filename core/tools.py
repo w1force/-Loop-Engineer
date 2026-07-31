@@ -123,7 +123,7 @@ def build_tool(
     name: str,
     description: str,
     input_model: type[BaseModel],
-    func: Callable[..., Awaitable[str | dict]],
+    func: Callable[..., Awaitable[str | TextBlock | list[TextBlock]]],
     is_concurrency_safe: bool = False,
     pre_execute: Callable[..., Awaitable[None]] | None = None,
     input_json_schema: dict | None = None,
