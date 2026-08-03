@@ -144,12 +144,53 @@ async def aggregate_stream(
                     )
                 )
                 raw_events.append({"type": "message_stop"})
+                # 残块兜底: provider 漏发 content_block_stop 就到了 message_stop。让残块走正常
+                # 固化 (yield AssistantMessage, input 兜底 {}) → executor model_validate 缺必填
+                # 字段失败 → is_error tool_result 回喂 Agent, 不再静默丢。
+                # 三处 TOOL_INPUT_MALFORMED 互斥、不重复 emit, 靠 "input_buf" in b 判据 + pop 切换:
+                #   content_block_stop (json_decode_error/not_dict, stop 到了但解析失败, pop)
+                #   | 此处 (no_content_block_stop, 残块, 正常路径, pop)
+                #   | finally (no_content_block_stop, 残块, 异常路径 message_stop 没到, 不 pop)。
+                for b in list(blocks.values()):
+                    if b.get("type") == "tool_use" and "input_buf" in b:
+                        tracer.emit(
+                            TraceEvent(
+                                kind=TraceKind.TOOL_INPUT_MALFORMED,
+                                payload={
+                                    "tool_use_id": b.get("id"),
+                                    "tool_name": b.get("name"),
+                                    "reason": "no_content_block_stop",
+                                    "parsed_type": None,
+                                    "raw_input_buf": b.get("input_buf", ""),
+                                },
+                            )
+                        )
+                        b.pop("input_buf", "")
+                        b["input"] = {}
+                        yield AssistantMessage(content=[_to_block(b)])
                 # 不再组装整轮 yield(由 stream_turn 收集 block 级后组装,见 Task 7)
     except Exception as e:
         # 聚合期间异常(如 provider 抛 ProviderError):记 error 字段后继续向上抛
         error = {"type": type(e).__name__, "message": str(e)}
         raise
     finally:
+        # 异常路径兜底: stream 抛异常时 message_stop 没到, 残块固化没跑, 这里补 emit MALFORMED
+        # (不 yield —— 异常该轮作废)。正常路径 input_buf 已在 message_stop 被 pop, 此处零影响。
+        # 三处 MALFORMED 的互斥关系见 message_stop 分支注释。
+        for b in blocks.values():
+            if b.get("type") == "tool_use" and "input_buf" in b:
+                tracer.emit(
+                    TraceEvent(
+                        kind=TraceKind.TOOL_INPUT_MALFORMED,
+                        payload={
+                            "tool_use_id": b.get("id"),
+                            "tool_name": b.get("name"),
+                            "reason": "no_content_block_stop",
+                            "parsed_type": None,
+                            "raw_input_buf": b.get("input_buf", ""),
+                        },
+                    )
+                )
         tracer.emit(
             TraceEvent(
                 kind=TraceKind.LLM_RESPONSE,

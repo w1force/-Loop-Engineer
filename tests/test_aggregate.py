@@ -104,3 +104,74 @@ async def test_truncated_tool_input_falls_back_to_empty_not_raised():
     assert len(malformed) == 1
     assert malformed[0].payload["reason"] == "json_decode_error"
     assert malformed[0].payload["raw_input_buf"] == '{"city": "Par'
+
+
+async def test_incomplete_tool_use_finalized_with_empty_input_and_emits_malformed():
+    """tool_use 收到 content_block_start + delta(累积 input_buf 到一半), 但 provider 漏发
+    content_block_stop 就 message_stop (实测 GLM stop_reason=tool_use 偶发)。
+
+    残块走正常固化: yield 一条 AssistantMessage(input 兜底成 {}, 截断的 input_buf 不解析),
+    经 stream_turn 喂 executor → model_validate 缺必填字段失败 → is_error tool_result 回喂
+    Agent (能重试, 不再静默丢失)。同时 emit TOOL_INPUT_MALFORMED(reason=no_content_block_stop)
+    供日志解释 detected 数与 exec_start 数的差。
+    """
+    spy = SpyTracer()
+    seq = [
+        StreamEvent(type="message_start"),
+        StreamEvent(type="content_block_start", index=0,
+                    block={"type": "tool_use", "id": "c1", "name": "CaptureDiagnosisEvidence", "input": {}}),
+        StreamEvent(type="content_block_delta", index=0,
+                    delta={"tool_input": '{"artifact_ids":["td"]'}),  # 截断的半截 JSON
+        # ★ 没有 content_block_stop (provider 漏发), 直接 message_stop
+        StreamEvent(type="message_delta", delta={"stop_reason": "tool_use"}),
+        StreamEvent(type="message_stop"),
+    ]
+    out = [x async for x in aggregate_stream(_events(*seq), spy)]
+
+    # 残块固化 (B): yield 一条 AssistantMessage, input={} 兜底 → 喂 executor 会校验失败
+    assts = _assts(out)
+    assert len(assts) == 1
+    assert assts[0].content == [ToolUseBlock(id="c1", name="CaptureDiagnosisEvidence", input={})]
+    # detected 仍在 (content_block_start 时 emit)
+    detected = [e for e in spy.events if e.kind is TraceKind.TOOL_USE_DETECTED]
+    assert len(detected) == 1
+    assert detected[0].payload["tool_name"] == "CaptureDiagnosisEvidence"
+    # 观测性: emit MALFORMED(reason=no_content_block_stop), 区别于 json_decode_error
+    malformed = [e for e in spy.events if e.kind is TraceKind.TOOL_INPUT_MALFORMED]
+    assert len(malformed) == 1
+    assert malformed[0].payload["reason"] == "no_content_block_stop"
+    assert malformed[0].payload["tool_use_id"] == "c1"
+    assert malformed[0].payload["raw_input_buf"] == '{"artifact_ids":["td"]'
+
+
+async def test_incomplete_tool_use_does_not_interfere_with_completed_blocks():
+    """一轮里既有完成的 tool_use 又有未完成的: 完成者正常 yield (input 解析), 未完成者
+    也固化 (input={} 兜底, B) —— 两者都进 executor, 互不干扰。"""
+    spy = SpyTracer()
+    seq = [
+        StreamEvent(type="message_start"),
+        # block 0: 完整 tool_use (有 stop)
+        StreamEvent(type="content_block_start", index=0,
+                    block={"type": "tool_use", "id": "ok", "name": "get_weather", "input": {}}),
+        StreamEvent(type="content_block_delta", index=0, delta={"tool_input": '{"city":"Paris"}'}),
+        StreamEvent(type="content_block_stop", index=0),
+        # block 1: 未完成 tool_use (漏 stop)
+        StreamEvent(type="content_block_start", index=1,
+                    block={"type": "tool_use", "id": "bad", "name": "f", "input": {}}),
+        StreamEvent(type="content_block_delta", index=1, delta={"tool_input": '{"x":'}),
+        StreamEvent(type="message_delta", delta={"stop_reason": "tool_use"}),
+        StreamEvent(type="message_stop"),
+    ]
+    out = [x async for x in aggregate_stream(_events(*seq), spy)]
+
+    assts = _assts(out)
+    assert len(assts) == 2  # 完成 block + 残块都固化
+    inputs = {b.id: b.input for a in assts for b in a.content if isinstance(b, ToolUseBlock)}
+    assert inputs["ok"] == {"city": "Paris"}  # 完成块 input 正常解析
+    assert inputs["bad"] == {}  # 残块 input 兜底 {} (executor 会校验失败)
+    detected = [e for e in spy.events if e.kind is TraceKind.TOOL_USE_DETECTED]
+    assert {e.payload["tool_use_id"] for e in detected} == {"ok", "bad"}
+    malformed = [e for e in spy.events if e.kind is TraceKind.TOOL_INPUT_MALFORMED]
+    assert len(malformed) == 1
+    assert malformed[0].payload["tool_use_id"] == "bad"
+    assert malformed[0].payload["reason"] == "no_content_block_stop"
