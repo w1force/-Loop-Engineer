@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol
 
 from core.agent_loop import (
     AgentConfig,
@@ -27,21 +25,6 @@ from diagnose.session import DiagnosisSession
 from telemetry.tracer import Tracer
 
 
-class AgentRunner(Protocol):
-    def run(
-        self,
-        prompt: str,
-        state: AgentState,
-        config: AgentConfig,
-        tracer: Tracer,
-    ) -> AsyncIterator[dict]: ...
-
-
-class CoreAgentRunner:
-    def run(self, prompt: str, state: AgentState, config: AgentConfig, tracer: Tracer) -> AsyncIterator[dict]:
-        return submit(prompt, state, config, tracer)
-
-
 @dataclass
 class DiagnosisWorkflow:
     session: DiagnosisSession
@@ -49,25 +32,32 @@ class DiagnosisWorkflow:
     review_config: AgentConfig | None
     review_policy: DiagnosisReviewPolicy
     tracer: Tracer
-    runner: AgentRunner = CoreAgentRunner()
 
     async def run(self, prompt: str) -> DiagnosisResult:
         diagnosis_state = build_agent_state(self.diagnosis_config)
         diagnosis_state.diagnose_session = self.session
         diagnosis_state.diagnose_actor = "diagnostician"
         try:
-            await self._drain(prompt, diagnosis_state, self.diagnosis_config)
-            if self.session.review_requested_revision is None:
-                return self._incomplete("diagnosis Agent ended without a successful FinalizeDiagnosis call")
-
+            # 禁用评审:诊断 agent 跑完直接定稿(无需 reviewer / 返工)。
             if self.review_policy.mode == ReviewMode.DISABLED:
+                await self._drain(prompt, diagnosis_state, self.diagnosis_config)
+                if self.session.review_requested_revision is None:
+                    return self._incomplete("diagnosis Agent ended without a successful FinalizeDiagnosis call")
                 self.session.finalize_without_review()
                 return self.session.build_result()
 
+            # 需要评审但没配 reviewer:提前失败,不白跑诊断。
             if self.review_config is None:
                 return self._incomplete("review is required but no review Agent config was provided")
 
+            # 诊断 → 评审 → (未通过则返工再诊断)… 最多 max_rework_rounds+1 轮。
+            # 第 0 轮用初始 prompt;返工轮用 _rework_prompt 把上轮评审意见回灌给诊断 agent。
+            next_prompt = prompt
             for round_index in range(self.review_policy.max_rework_rounds + 1):
+                await self._drain(next_prompt, diagnosis_state, self.diagnosis_config)
+                if self.session.review_requested_revision is None:
+                    return self._incomplete("diagnosis Agent ended without a successful FinalizeDiagnosis call")
+
                 review = await self._run_review(round_index)
                 if review is None:
                     return self._incomplete("review Agent ended without SubmitDiagnosisReview")
@@ -83,6 +73,7 @@ class DiagnosisWorkflow:
                         return self._incomplete("final gate rejected approved review: " + "; ".join(reasons))
                     return self.session.build_result()
 
+                # 未通过且已达返工上限:按 unresolved_action 降级收尾。
                 if round_index >= self.review_policy.max_rework_rounds:
                     self.session.apply_review(
                         review,
@@ -96,9 +87,8 @@ class DiagnosisWorkflow:
                         return self._incomplete("final gate rejected downgraded review: " + "; ".join(reasons))
                     return self.session.build_result()
 
-                await self._drain(self._rework_prompt(round_index), diagnosis_state, self.diagnosis_config)
-                if self.session.review_requested_revision is None:
-                    return self._incomplete("diagnosis Agent rework ended without FinalizeDiagnosis")
+                # 还有返工预算:把评审意见回灌给诊断 agent,下一轮重跑诊断。
+                next_prompt = self._rework_prompt(round_index)
 
             return self._incomplete("diagnosis workflow exhausted unexpectedly")
         finally:
@@ -125,7 +115,7 @@ class DiagnosisWorkflow:
         return self.session.review_history[-1].review
 
     async def _drain(self, prompt: str, state: AgentState, config: AgentConfig) -> None:
-        async for _ in self.runner.run(prompt, state, config, self.tracer):
+        async for _ in submit(prompt, state, config, self.tracer):
             pass
 
     def _rework_prompt(self, round_index: int) -> str:

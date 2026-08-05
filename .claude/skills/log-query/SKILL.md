@@ -63,9 +63,57 @@ jq 'select(.turn==3)' $F
 ### LLM 调用
 ```bash
 jq -c 'select(.kind=="provider_request")|{turn,msg_count:.payload.msg_count,max_tokens:.payload.req_body.max_tokens}' $F
-jq -c 'select(.kind=="llm_response")|{turn,stop:.payload.stop_reason,usage:.payload.usage,error:.payload.error}' $F
+jq -c 'select(.kind=="llm_response")|{turn,stop:.payload.stop_reason,usage:.payload.usage,error:.payload.error}' $F   # 每轮 usage 速览
 jq -c 'select(.kind=="llm_response")|.payload.stop_reason' $F | sort | uniq -c   # stop_reason 分布
 ```
+
+### Token / cache 性能分析
+
+usage 字段都在 `llm_response.payload.usage`,含义:
+
+| 字段 | 含义 | 用途 |
+|---|---|---|
+| `input_tokens` | 本次请求**新算**的输入 token | 找暴涨/离群就看它 |
+| `output_tokens` | 本次生成的输出 token | 看每轮产出量 |
+| `cache_read_input_tokens` | 命中 prompt cache、免重算的部分 | `>0` 即命中,健康信号 |
+| `cache_creation_input_tokens` | 本轮新写入缓存的部分(部分 provider 才有) | 首次写入的体量 |
+
+发现异常轮(input 最大的几轮,按量级找离群点):
+```bash
+jq -r 'select(.kind=="llm_response")|"\(.payload.usage.input_tokens) turn=\(.turn)"' $F | sort -rn | head
+```
+正常 agentic loop 每轮 `input_tokens` 在几百~几千小幅波动;**比相邻轮次高一个数量级**即为暴涨,基本是上轮工具结果把大块新内容喂进了历史。
+
+总量统计(整次运行的 input/output 总和):
+```bash
+jq -s '[.[]|select(.kind=="llm_response")|.payload.usage.input_tokens]|add' $F
+jq -s '[.[]|select(.kind=="llm_response")|.payload.usage.output_tokens]|add' $F
+```
+
+判断 cache 是否命中:`cache_read_input_tokens>0` 即命中。判读时把每轮三列一起看:
+
+```bash
+# turn / msg_count / input_tokens / cache_read 四列对照
+jq -r 'select(.kind=="provider_request")|"\(.turn)\t\(.payload.msg_count)"' $F > .zcode/_mc.txt
+jq -r 'select(.kind=="llm_response")|"\(.turn)\t\(.payload.usage.input_tokens)\t\(.payload.usage.cache_read_input_tokens//0)"' $F > .zcode/_us.txt
+paste .zcode/_mc.txt .zcode/_us.txt | awk '{printf "turn=%-3s msg=%-3s input=%-6s cache_read=%-6s total≈%-7s\n",$1,$2,$4,$5,$4+$5}'
+```
+
+**关键认知**:`input_tokens` 是"本次新算的",**不是消息总大小**。真正的总输入 ≈ `input_tokens + cache_read_input_tokens`。所以"暴涨"有两种本质不同的成因,要用 `cache_read` 区分:
+
+| 现象 | 本质 | 怎么确认 |
+|---|---|---|
+| `input_tokens` 涨 **且** `cache_read` 也降/归零,**total ≈ 不变** | **前缀 cache 整体 miss 被重算**(消息历史一直就那么大,只是这轮没命中缓存) | total(input+cache_read)前后接近 → 是 cache 失效,不是内容膨胀 |
+| `input_tokens` 涨 **且** `cache_read` 保持高,**total 明显增大** | **真的有大块新内容进历史** | total 比上轮大一截 → 去该轮 `tool_exec_end` 找大 tool_result(整文件 Read / 大 JSON MCP 返回) |
+
+前者最典型的信号是 **`cache_read=0`(整段前缀失效)**。原因通常是:provider 端缓存 TTL 过期/被驱逐(运行较慢、轮间隔大时常见),或 provider 的 cache 语义与前缀追加不兼容。确认靠时间戳 ——
+
+```bash
+# 看相邻两次 provider_request 的 wall-clock 间隔(判断是否逼近 provider 的 cache TTL)
+jq -r 'select(.kind=="provider_request")|"\(.ts)"' $F
+```
+
+> 注意:`cache_read_input_tokens` 大不等于暴涨,反而代表健康(命中缓存省算力)。单看 `input_tokens` 容易误判:它高可能只是"这轮 cache miss",历史其实没变大。**务必用 `input + cache_read` 的 total 来判断内容是否真的膨胀。**
 
 ### 核对 provider 原始返回(诊断 max_tokens/stop_reason 真实取值)
 ```bash

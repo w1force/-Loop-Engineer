@@ -1,15 +1,18 @@
 """Task 7/Task 3: builtin_tools() 工厂注册测试。
 
-Task 3 起工厂无参,返回 5 个 Tool(含 load_skill),func 从 ctx.agent_state 取。
+工厂无参,返回内置 Tool 集合(Read/Write/Edit/Bash/Glob/Grep/LSP/Load_Skill),
+func 从 ctx.agent_state 取。新增工具时更新下方期望列表即可。
 """
 from core.registry import get_tools
 from core.tools import Tool
 
+_EXPECTED_TOOL_NAMES = {"Read", "Write", "Edit", "Bash", "Glob", "Grep", "LSP", "Load_Skill"}
 
-def test_builtin_tools_returns_five():
+
+def test_builtin_tools_returns_expected_set():
     tools = get_tools(False)
-    names = [t.name for t in tools]
-    assert sorted(names) == ["Glob", "Grep", "Load_Skill", "Read", "Write"]
+    names = {t.name for t in tools}
+    assert names == _EXPECTED_TOOL_NAMES
     for t in tools:
         assert isinstance(t, Tool)
 

@@ -19,6 +19,8 @@ from core.tools import Tool
 from core.types import AgentState, AssistantMessage, TextBlock, UserMessage
 from telemetry.tracer import NoopTracer
 
+from config import Settings
+
 BASE = "https://api.anthropic.com"
 
 
@@ -79,7 +81,7 @@ async def test_tool_use_roundtrip_executes_and_reinjects():
     responses = iter([httpx.Response(200, text=ROUND1), httpx.Response(200, text=ROUND2)])
     respx.post(f"{BASE}/v1/messages").mock(side_effect=lambda req: next(responses))
 
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     params = QueryParams(
         system="",
         model="claude-sonnet-4-6",

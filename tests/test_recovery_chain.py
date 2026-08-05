@@ -110,7 +110,9 @@ async def test_max_tokens_recovery_injects_meta_and_placeholders():
     assert d.next_state is not None
     # 本轮 assistant + 占位 result + meta 三条进历史
     added = d.next_state.messages[-3:]
-    assert added[0] == AssistantMessage(content=[TextBlock(text="半句")])
+    # 用 content 比较而非 ==:AssistantMessage 带自动生成的 uuid,实例级 == 恒不等。
+    assert isinstance(added[0], AssistantMessage)
+    assert added[0].content == [TextBlock(text="半句")]
     # 占位 user message: 1 个 is_error tool_result
     placeholder = cast(ToolResultBlock, added[1].content[0])
     assert placeholder.is_error is True
@@ -128,7 +130,9 @@ async def test_max_tokens_recovery_no_tool_calls_skips_placeholder():
                            params=None, tracer=NoopTracer())
     assert d.next_state is not None
     added = d.next_state.messages[-2:]  # 仅 assistant + meta, 无占位
-    assert added[0] == AssistantMessage(content=[TextBlock(text="半句")])
+    # 用 content 比较而非 ==:AssistantMessage 带自动生成的 uuid,实例级 == 恒不等。
+    assert isinstance(added[0], AssistantMessage)
+    assert added[0].content == [TextBlock(text="半句")]
     assert "Resume directly" in added[1].content
 
 

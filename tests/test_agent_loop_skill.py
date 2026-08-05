@@ -77,7 +77,10 @@ def test_build_system_prompt_str():
     astate = AgentState(skills=[m])
     cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
     out = build_system_prompt(astate, cfg)
-    assert isinstance(out, str) and out.startswith("base") and "<skills>" in out and "foo" in out
+    # 有 skills 时追加 Skill 使用说明段(含 Load_Skill 指引);skill 名/description 不在此注入
+    # (skill 列表由运行时动态列出),故不断言 "foo"。
+    assert isinstance(out, str) and out.startswith("base")
+    assert "# Skill 使用说明" in out and "Load_Skill" in out
 
 
 def test_build_system_prompt_list():
@@ -88,7 +91,7 @@ def test_build_system_prompt_list():
     )
     out = build_system_prompt(astate, cfg)
     assert isinstance(out, list) and out[0] == {"type": "text", "text": "a"}
-    assert "<skills>" in out[-1]["text"]
+    assert "# Skill 使用说明" in out[-1]["text"]
 
 
 def test_build_system_prompt_list_includes_agent_cwd():
@@ -112,8 +115,13 @@ def test_build_system_prompt_empty_skills_list_passthrough():
     assert "<system-reminder>" in out[-1]["text"]
 
 
-def test_build_system_prompt_description_whitespace_collapsed():
-    """description 多行空白压缩成单行。"""
+def test_build_system_prompt_description_not_injected():
+    """build_system_prompt 不再注入 skill description。
+
+    skill description 的展示(及其多行空白压缩)已迁移到运行时 skill 列表注入路径
+    (对话中 "The following skills are available..." 段),不在 build_system_prompt 职责内。
+    此处仅断言:description 不会泄漏进 system prompt 基底。
+    """
     m = SkillMeta(
         name="foo",
         description="line one\n  line two",
@@ -123,4 +131,5 @@ def test_build_system_prompt_description_whitespace_collapsed():
     astate = AgentState(skills=[m])
     cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
     out = build_system_prompt(astate, cfg)
-    assert "line one line two" in out
+    assert "line one line two" not in out
+    assert "line one" not in out  # description 不进 system prompt 基底

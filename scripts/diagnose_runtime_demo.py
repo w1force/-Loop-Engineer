@@ -55,11 +55,7 @@ async def main() -> None:
     settings = get_settings()
     if not settings.api_key:
         raise RuntimeError("set LOOP_ENGINEER_API_KEY before running the demo")
-    provider = AnthropicAdapter(
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-        debug_sse=settings.debug_sse,
-    )
+    provider = AnthropicAdapter(settings)
     base = AgentConfig(
         provider=provider,
         system=build_diagnose_system_prompt(),

@@ -24,6 +24,8 @@ from core.types import (
 from telemetry.events import TraceKind
 from telemetry.tracer import NoopTracer
 
+from config import Settings
+
 BASE = "https://api.anthropic.com"
 
 
@@ -93,7 +95,7 @@ class SpyTracer(NoopTracer):
 @respx.mock
 async def test_stream_translates_sse_to_stream_events():
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
 
     events = []
     async for evt in adapter.stream(
@@ -121,7 +123,7 @@ async def test_stream_translates_sse_to_stream_events():
 async def test_stream_emits_provider_request_before_request():
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
     spy = SpyTracer()
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     async for _ in adapter.stream(
         messages=[UserMessage(content="hi")],
         system="",
@@ -169,7 +171,7 @@ async def test_stream_ignores_ping_keepalive():
     respx.post(f"{BASE}/v1/messages").mock(
         return_value=httpx.Response(200, text=ANTHROPIC_SSE_WITH_PING)
     )
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     events = [
         e
         async for e in adapter.stream(
@@ -197,7 +199,7 @@ PROMPT_TOO_LONG_BODY = (
 @respx.mock
 async def test_classify_429_to_transient():
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(429, text="rate"))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(TransientProviderError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",
@@ -209,7 +211,7 @@ async def test_classify_429_to_transient():
 @respx.mock
 async def test_classify_500_to_transient():
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(503, text="down"))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(TransientProviderError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",
@@ -222,7 +224,7 @@ async def test_classify_500_to_transient():
 async def test_classify_prompt_too_long_400():
     respx.post(f"{BASE}/v1/messages").mock(
         return_value=httpx.Response(400, text=PROMPT_TOO_LONG_BODY))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(PromptTooLongError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",
@@ -235,7 +237,7 @@ async def test_classify_prompt_too_long_400():
 async def test_classify_other_400_to_fatal():
     respx.post(f"{BASE}/v1/messages").mock(
         return_value=httpx.Response(400, text='{"error":{"message":"bad model"}}'))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(FatalProviderError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",
@@ -251,7 +253,7 @@ async def test_stream_overloaded_error_is_transient():
         'data: {"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}\n\n'
     )
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=sse))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(TransientProviderError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",
@@ -267,7 +269,7 @@ async def test_stream_generic_error_is_fatal():
         'data: {"type":"error","error":{"type":"api_error","message":"boom"}}\n\n'
     )
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=sse))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(FatalProviderError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",
@@ -279,7 +281,7 @@ async def test_stream_generic_error_is_fatal():
 @respx.mock
 async def test_transport_error_becomes_transient():
     respx.post(f"{BASE}/v1/messages").mock(side_effect=httpx.ConnectError("conn refused"))
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     with pytest.raises(TransientProviderError):
         async for _ in adapter.stream(
             messages=[UserMessage(content="hi")], system="", tools=[], model="m",

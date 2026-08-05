@@ -7,6 +7,10 @@
 环境变量(.env 同名键):
     LOOP_ENGINEER_API_KEY     API key(端到端验收需要)
     LOOP_ENGINEER_BASE_URL    默认官方 https://api.anthropic.com
+    LOOP_ENGINEER_USE_HTTP_PROXY_ENV
+                              是否让 httpx 读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 等环境
+                              代理变量; 默认 false(本项目直连, 避免本机 SOCKS 代理触发
+                              socksio 缺失报错)。需要走环境代理时设 true。
     LOOP_ENGINEER_MODEL       模型 id
     LOOP_ENGINEER_MAX_TOKENS  单次生成上限
     LOOP_ENGINEER_MAX_TURNS   内层 query_loop 最大轮次守卫
@@ -24,6 +28,12 @@ class Settings(BaseSettings):
 
     api_key: str = ""
     base_url: str = "https://api.anthropic.com"
+    # 是否让 httpx 读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 等环境代理。默认 False:
+    # 本项目自带 base_url 直连即可, 避免本机 SOCKS 代理(httpx 处理 socks5 需 socksio)
+    # 导致 ImportError。需要走环境代理时设 LOOP_ENGINEER_USE_HTTP_PROXY_ENV=true。
+    # (对应 httpx.AsyncClient(trust_env=...); 此处用更直白的名字避免与 httpx 内部
+    # 参数名 trust_env 混淆,USE_HTTP_PROXY_ENV 一眼看出语义 = "用环境变量里的代理"。)
+    use_http_proxy_env: bool = False
     model: str = "claude-sonnet-4-6"
     review_model: str | None = None  # None 时 reviewer 复用 model
     diagnosis_max_rework_rounds: int = 1
@@ -35,5 +45,28 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    """每次调用读取最新环境(便于测试覆盖)。"""
-    return Settings()
+    """返回进程级单例 Settings(懒加载)。
+
+    首次调用从 .env / 环境变量构造一次并缓存,之后所有调用共享同一实例 ——
+    配置语义上应进程内一致,且避免反复读 .env / 解析环境变量的开销。
+
+    需要重新读取环境(测试覆盖、运行时热更)时调 reset_settings() 清缓存,
+    下次 get_settings() 会重新构造。
+    """
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+
+_settings: Settings | None = None
+
+
+def reset_settings() -> None:
+    """清空缓存的 Settings 单例。下次 get_settings() 重新从环境读取。
+
+    主要供测试覆盖配置:在测试里用 monkeypatch 改环境变量后调用此函数,
+    再 get_settings() 即可拿到反映新环境的实例。
+    """
+    global _settings
+    _settings = None

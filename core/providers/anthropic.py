@@ -10,9 +10,16 @@ import logging
 import sys
 import time
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
+
+if TYPE_CHECKING:
+    # 仅用于类型注解; 运行时不 import, 避免 core/providers 反向依赖 config 层
+    # (README 约定 config 层 provider 中立)。adapter 在运行时按鸭子类型读取
+    # settings.api_key / base_url / debug_sse / use_http_proxy_env 字段。
+    from config import Settings
 
 from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
@@ -88,17 +95,27 @@ class AnthropicAdapter(BaseAdapter, Provider):
 
     def __init__(
         self,
-        api_key: str,
-        base_url: str = "https://api.anthropic.com",
-        debug_sse: bool = False,
+        settings: Settings,
+        *,
         enable_cache_editing: bool = False,
     ):
+        # 吃整个 Settings: 以后新增 http 相关配置(代理/超时/重试...)只需扩 Settings 字段,
+        # 不必再改 adapter 构造签名。运行时按鸭子类型读字段,不 import config 层
+        # (见模块顶部 TYPE_CHECKING 注释),保持 core ⊥ config 的依赖方向。
+        api_key = settings.api_key
+        base_url = settings.base_url
+        debug_sse = settings.debug_sse
+        use_http_proxy_env = settings.use_http_proxy_env
         headers = {
             "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
-        super().__init__(base_url=base_url.rstrip("/"), headers=headers)
+        super().__init__(
+            base_url=base_url.rstrip("/"),
+            headers=headers,
+            use_http_proxy_env=use_http_proxy_env,
+        )
         self._base_url = base_url.rstrip("/")  # 供 is_first_party_anthropic 判定主机
         self._debug_sse = debug_sse  # True 时打印原始 SSE 流(观察流式节奏)
         # 缓存感知式 microcompact 的操作员总开关(对齐 CC 的 CLAUDE_CACHED_MICROCOMPACT 显式 opt-in)。

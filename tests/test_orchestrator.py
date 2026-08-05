@@ -28,6 +28,8 @@ from core.types import (
 from telemetry.events import TraceKind
 from telemetry.tracer import NoopTracer
 
+from config import Settings
+
 BASE = "https://api.anthropic.com"
 
 ANTHROPIC_SSE = (
@@ -64,7 +66,7 @@ class SpyTracer(NoopTracer):
 
 
 def _params(spy_tracer=None) -> QueryParams:
-    adapter = AnthropicAdapter(api_key="k", base_url=BASE)
+    adapter = AnthropicAdapter(Settings(api_key="k", base_url=BASE))
     return QueryParams(
         system="be brief",
         model="claude-sonnet-4-6",

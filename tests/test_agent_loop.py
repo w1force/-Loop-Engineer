@@ -20,6 +20,8 @@ from core.types import (
 )
 from telemetry.tracer import NoopTracer
 
+from config import Settings
+
 BASE = "https://api.anthropic.com"
 ANTHROPIC_SSE = (
     'event: message_start\n'
@@ -70,7 +72,7 @@ async def test_submit_success_writes_transcript(tmp_path):
     respx.post(f"{BASE}/v1/messages").mock(return_value=httpx.Response(200, text=ANTHROPIC_SSE))
     path = tmp_path / "t.jsonl"
     cfg = AgentConfig(
-        provider=AnthropicAdapter(api_key="k", base_url=BASE),
+        provider=AnthropicAdapter(Settings(api_key="k", base_url=BASE)),
         system="be brief",
         model="claude-sonnet-4-6",
         max_tokens=128,
