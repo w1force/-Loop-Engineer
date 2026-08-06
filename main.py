@@ -12,7 +12,12 @@ from pydantic import BaseModel
 
 from config import get_settings
 from core.agent_loop import AgentConfig, build_agent_state, submit
-from core.mcp import MCPManager, build_tda_mcp_config, load_mcp_configs
+from core.mcp import (
+    MCPManager,
+    MCPToolExecutionPolicy,
+    build_tda_mcp_config,
+    load_mcp_configs,
+)
 from core.prompts import build_diagnose_system_prompt
 from core.providers.anthropic import AnthropicAdapter
 from core.session_memory import await_pending_extractions
@@ -27,12 +32,20 @@ def build_mcp_manager_from_settings(s) -> MCPManager | None:
     默认关闭,避免普通开发环境启动 main.py 时额外拉起外部进程。
     """
 
+    execution_policy = MCPToolExecutionPolicy(
+        timeout_seconds=s.mcp_tool_timeout_seconds,
+        heartbeat_seconds=s.mcp_tool_heartbeat_seconds,
+    )
     mcp_config_items = [*s.mcp_config]
     if s.mcp_config_path:
         mcp_config_items.append(s.mcp_config_path)
     if mcp_config_items:
         configs = load_mcp_configs(mcp_config_items)
-        return MCPManager(configs, tool_wait_timeout=s.mcp_tool_wait_timeout)
+        return MCPManager(
+            configs,
+            tool_wait_timeout=s.mcp_tool_wait_timeout,
+            execution_policy=execution_policy,
+        )
     if not s.tda_enabled:
         return None
     if not s.tda_jar_path:
@@ -42,6 +55,7 @@ def build_mcp_manager_from_settings(s) -> MCPManager | None:
     return MCPManager(
         [build_tda_mcp_config(s.tda_jar_path, timeout=s.tda_timeout)],
         tool_wait_timeout=s.tda_tool_wait_timeout,
+        execution_policy=execution_policy,
     )
 
 

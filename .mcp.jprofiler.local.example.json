@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "JProfiler": {
+      "type": "stdio",
+      "command": "/path/to/JProfiler/bin/jpmcp",
+      "args": ["--filter", "com.example.app"],
+      "timeout": 300
+    }
+  }
+}

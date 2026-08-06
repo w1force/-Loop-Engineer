@@ -42,7 +42,7 @@ class FakeMCPClient:
         name: str,
         arguments: dict,
         *,
-        progress_callback=None,
+        options=None,
     ) -> MCPToolResult:
         return MCPToolResult(content=f"{self.config.name}:{name}:{arguments['value']}")
 
@@ -187,5 +187,59 @@ async def test_ready_tools_snapshot_does_not_start_disconnected_server():
         assert tools == []
         assert created == []
         assert health.state == MCPServerState.DISCONNECTED
+    finally:
+        await manager.close()
+
+
+async def test_stdio_transport_does_not_inherit_undeclared_environment(
+    monkeypatch,
+):
+    """删除 SDK 的安全环境边界会把宿主机秘密变量泄漏给 MCP server。"""
+    secret_name = "LOOP_ENGINEER_TRANSPORT_UNDECLARED_SECRET"
+    monkeypatch.setenv(secret_name, "must-not-leak")
+    manager = MCPManager(
+        [
+            MCPServerConfig(
+                name="demo",
+                command=sys.executable,
+                args=[str(FIXTURE)],
+                env={"MCP_DEMO_ENABLE_ENV_TOOL": "1"},
+            )
+        ]
+    )
+
+    try:
+        await manager.start()
+        result = await manager.call_tool("demo", "read_env", {"name": secret_name})
+
+        assert result.content == ""
+    finally:
+        await manager.close()
+
+
+async def test_stdio_transport_inherits_explicit_server_environment():
+    """删除 config.env 合并会让明确配置给 server 的凭据和路径失效。"""
+    configured_name = "LOOP_ENGINEER_TRANSPORT_CONFIGURED_VALUE"
+    manager = MCPManager(
+        [
+            MCPServerConfig(
+                name="demo",
+                command=sys.executable,
+                args=[str(FIXTURE)],
+                env={
+                    "MCP_DEMO_ENABLE_ENV_TOOL": "1",
+                    configured_name: "configured",
+                },
+            )
+        ]
+    )
+
+    try:
+        await manager.start()
+        result = await manager.call_tool(
+            "demo", "read_env", {"name": configured_name}
+        )
+
+        assert result.content == "configured"
     finally:
         await manager.close()

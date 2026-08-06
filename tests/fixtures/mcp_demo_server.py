@@ -47,6 +47,16 @@ TOOLS = [
     },
 ]
 
+ENV_TOOL = {
+    "name": "read_env",
+    "description": "Return one environment variable for transport tests",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    },
+}
+
 
 def _send(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -79,7 +89,10 @@ def _handle(request: dict) -> None:
         return
     if method == "tools/list":
         _sleep_from_env("MCP_DEMO_LIST_DELAY")
-        _send({"jsonrpc": "2.0", "id": request["id"], "result": {"tools": TOOLS}})
+        tools = list(TOOLS)
+        if os.environ.get("MCP_DEMO_ENABLE_ENV_TOOL") == "1":
+            tools.append(ENV_TOOL)
+        _send({"jsonrpc": "2.0", "id": request["id"], "result": {"tools": tools}})
         return
     if method == "tools/call":
         params = request.get("params") or {}
@@ -140,11 +153,13 @@ def _handle(request: dict) -> None:
             )
             return
         if params.get("name") == "progress_then_text":
+            meta = params.get("_meta") or {}
             _send(
                 {
                     "jsonrpc": "2.0",
                     "method": "notifications/progress",
                     "params": {
+                        "progressToken": meta.get("progressToken"),
                         "progress": 1,
                         "total": 2,
                         "message": "halfway",
@@ -157,6 +172,21 @@ def _handle(request: dict) -> None:
                     "id": request["id"],
                     "result": {
                         "content": [{"type": "text", "text": "done"}],
+                        "isError": False,
+                    },
+                }
+            )
+            return
+        if params.get("name") == "read_env":
+            name = str((params.get("arguments") or {}).get("name", ""))
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": os.environ.get(name, "")}
+                        ],
                         "isError": False,
                     },
                 }

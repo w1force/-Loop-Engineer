@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "JProfiler": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@ej-technologies/jprofiler-mcp@latest"],
+      "timeout": 300
+    }
+  }
+}

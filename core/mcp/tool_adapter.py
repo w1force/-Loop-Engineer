@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -12,6 +13,8 @@ from ..tools import ToolContext, build_tool
 from .result_policy import MCPResultPolicy
 from .strings import build_mcp_tool_name
 from .types import MCPToolResult, MCPToolSpec
+
+logger = logging.getLogger(__name__)
 
 
 class MCPInput(BaseModel):
@@ -28,6 +31,7 @@ class MCPToolCaller(Protocol):
         arguments: dict,
         *,
         progress_callback=None,
+        abort_signal=None,
     ) -> str | MCPToolResult: ...
 
 
@@ -45,28 +49,45 @@ def create_mcp_tool(
         # spec 同时保存两者:full_name 给模型/权限,原始 name 给 server 调用。
         def _on_progress(event) -> None:
             try:
+                payload = {
+                    "server_name": spec.server_name,
+                    "tool_name": spec.name,
+                    "progress": event.progress,
+                    "total": event.total,
+                    "message": event.message,
+                }
+                if event.source == "heartbeat":
+                    payload.update(
+                        {
+                            "source": event.source,
+                            "elapsed_seconds": event.elapsed_seconds,
+                            "received_server_progress": event.received_server_progress,
+                        }
+                    )
                 ctx.tracer.emit(
                     TraceEvent(
                         kind=TraceKind.TOOL_EXEC_PROGRESS,
-                        payload={
-                            "server_name": spec.server_name,
-                            "tool_name": spec.name,
-                            "progress": event.progress,
-                            "total": event.total,
-                            "message": event.message,
-                        },
+                        payload=payload,
                     )
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "MCP progress trace failed for %s.%s",
+                    spec.server_name,
+                    spec.name,
+                    exc_info=True,
+                )
 
         arguments = inp.model_dump(mode="json")
         if _accepts_progress_callback(caller):
+            kwargs = {"progress_callback": _on_progress}
+            if _accepts_abort_signal(caller):
+                kwargs["abort_signal"] = ctx.abort_signal
             result = await caller.call_tool(
                 spec.server_name,
                 spec.name,
                 arguments,
-                progress_callback=_on_progress,
+                **kwargs,
             )
         else:
             result = await caller.call_tool(spec.server_name, spec.name, arguments)
@@ -96,5 +117,16 @@ def _accepts_progress_callback(caller: MCPToolCaller) -> bool:
         return True
     return any(
         name == "progress_callback" or param.kind is param.VAR_KEYWORD
+        for name, param in signature.parameters.items()
+    )
+
+
+def _accepts_abort_signal(caller: MCPToolCaller) -> bool:
+    try:
+        signature = inspect.signature(caller.call_tool)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        name == "abort_signal" or param.kind is param.VAR_KEYWORD
         for name, param in signature.parameters.items()
     )

@@ -4,7 +4,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
-from .types import MCPProgressEvent, MCPServerConfig, MCPToolResult, MCPToolSpec
+from .types import (
+    MCPProgressEvent,
+    MCPServerConfig,
+    MCPToolCallOptions,
+    MCPToolResult,
+    MCPToolSpec,
+)
 
 ProgressCallback = Callable[[MCPProgressEvent], None]
 
@@ -25,7 +31,7 @@ class MCPClientProtocol(Protocol):
         name: str,
         arguments: dict,
         *,
-        progress_callback: ProgressCallback | None = None,
+        options: MCPToolCallOptions,
     ) -> MCPToolResult:
         """调用 MCP server 上的原始 tool name。"""
 

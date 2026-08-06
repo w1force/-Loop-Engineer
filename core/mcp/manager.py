@@ -6,11 +6,18 @@ import time
 from collections.abc import Callable
 
 from .client_protocol import MCPClientProtocol
-from .errors import MCPTransportUnsupportedError
+from .errors import (
+    MCPConnectionClosedError,
+    MCPProtocolError,
+    MCPTransportUnsupportedError,
+)
+from .execution import call_mcp_tool
 from .factory import create_mcp_client
 from .result_policy import MCPResultPolicy
 from .tool_adapter import create_mcp_tool
 from .types import (
+    MCPToolCallOptions,
+    MCPToolExecutionPolicy,
     MCPServerConfig,
     MCPServerHealth,
     MCPServerState,
@@ -36,6 +43,7 @@ class MCPManager:
         clock: Callable[[], float] | None = None,
         result_policy: MCPResultPolicy | None = None,
         client_factory: MCPClientFactory | None = None,
+        execution_policy: MCPToolExecutionPolicy | None = None,
     ):
         self._configs = {cfg.name: cfg for cfg in configs}
         self._clients: dict[str, MCPClientProtocol] = {}
@@ -46,6 +54,7 @@ class MCPManager:
         self._retry_max_attempts = retry_max_attempts
         self._clock = clock or time.monotonic
         self._result_policy = result_policy or MCPResultPolicy()
+        self._execution_policy = execution_policy or MCPToolExecutionPolicy()
         self._states = {
             cfg.name: (
                 MCPServerState.DISABLED
@@ -164,6 +173,7 @@ class MCPManager:
         arguments: dict,
         *,
         progress_callback=None,
+        abort_signal: asyncio.Event | None = None,
     ) -> MCPToolResult:
         # tool_adapter 保留原始 server/tool 名到 mcp_info,所以执行时不需要再从
         # mcp__server__tool 字符串反解析,也避免归一化名称和原始名称混淆。
@@ -172,11 +182,27 @@ class MCPManager:
         if self._states[server_name] == MCPServerState.DISABLED:
             raise ValueError(f"MCP server '{server_name}' is disabled")
         client = self._get_or_create_client(server_name)
-        return await client.call_tool(
-            tool_name,
-            arguments,
-            progress_callback=progress_callback,
-        )
+        try:
+            return await call_mcp_tool(
+                client=client,
+                server_name=server_name,
+                tool_name=tool_name,
+                arguments=arguments,
+                options=MCPToolCallOptions(
+                    timeout_seconds=self._execution_policy.timeout_seconds,
+                    heartbeat_seconds=self._execution_policy.heartbeat_seconds,
+                    abort_signal=abort_signal,
+                    progress_callback=progress_callback,
+                ),
+            )
+        except (MCPConnectionClosedError, MCPProtocolError) as exc:
+            self._states[server_name] = MCPServerState.FAILED
+            self._errors[server_name] = str(exc)
+            self._tool_cache[server_name] = []
+            self._schedule_retry(server_name)
+            await self._close_client(server_name)
+            self._schedule_background_retry(server_name)
+            raise
 
     def health(self) -> list[MCPServerHealth]:
         return [

@@ -13,6 +13,9 @@ wheels/
 # 本地环境变量(含 API key)
 .env
 
+# 本机 MCP 配置可能包含个人路径、token 或公司内网地址;只提交 .mcp*.example.json。
+.mcp.json
+
 # transcript 持久化产物
 *.transcript.jsonl
 

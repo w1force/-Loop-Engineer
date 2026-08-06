@@ -57,7 +57,8 @@ class MCPServerConfig:
     name: str
     command: str = ""
     args: list[str] = field(default_factory=list)
-    # env 只叠加到当前进程环境上,便于给某个 MCP server 单独传 token/path。
+    # env 只显式传给该 server;官方 SDK 另外保留 PATH/HOME 等安全基础环境,
+    # 不会把宿主进程的全部 token/secret 隐式泄漏给子进程。
     env: dict[str, str] = field(default_factory=dict)
     timeout: float = 10.0
     transport: MCPTransport = MCPTransport.STDIO
@@ -65,6 +66,23 @@ class MCPServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     oauth: dict[str, Any] | None = None
     disabled: bool = False
+
+
+@dataclass(frozen=True)
+class MCPToolExecutionPolicy:
+    """MCP tools/call 的统一执行策略。
+
+    对齐 CCB:工具调用超时独立于 initialize/tools/list 等控制请求超时。
+    """
+
+    timeout_seconds: float = 100_000.0
+    heartbeat_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("MCP tool timeout must be greater than 0")
+        if self.heartbeat_seconds <= 0:
+            raise ValueError("MCP tool heartbeat must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -86,6 +104,22 @@ class MCPProgressEvent:
     progress: int | float | None = None
     total: int | float | None = None
     message: str | None = None
+    source: str = "server"
+    elapsed_seconds: float | None = None
+    received_server_progress: bool | None = None
+
+
+@dataclass(frozen=True)
+class MCPToolCallOptions:
+    """一次 MCP tools/call 的运行时选项。
+
+    execution 层负责填充这些值;transport 只按选项执行当前 request。
+    """
+
+    timeout_seconds: float
+    heartbeat_seconds: float = 30.0
+    abort_signal: Any | None = None
+    progress_callback: Any | None = None
 
 
 @dataclass(frozen=True)

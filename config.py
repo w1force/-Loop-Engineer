@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     mcp_config: list[str] = Field(default_factory=list)  # LOOP_ENGINEER_MCP_CONFIG='[".mcp.json", "{...}"]'
     mcp_config_path: str = ""  # LOOP_ENGINEER_MCP_CONFIG_PATH=.mcp.json,单文件便捷入口
     mcp_tool_wait_timeout: float = 5.0  # 首轮等 MCP 工具列表的最长时间;超时后主流程继续
+    mcp_tool_timeout_seconds: float = 100_000.0  # 对齐 CCB MCP tools/call 默认长超时
+    mcp_tool_heartbeat_seconds: float = 30.0  # MCP 长工具调用 still-running 心跳间隔
     tda_enabled: bool = False  # LOOP_ENGINEER_TDA_ENABLED=true 时把真实 TDA MCP 接进 agent
     tda_jar_path: str = ""  # LOOP_ENGINEER_TDA_JAR_PATH=/path/to/tda-3.2.jar
     tda_timeout: float = 60.0  # TDA 启动和分析 thread dump 可能比普通 MCP 工具慢

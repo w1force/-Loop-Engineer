@@ -137,7 +137,7 @@ async def test_retry_success_resets_failure_state():
                 )
             ]
 
-        async def call_tool(self, name, arguments, *, progress_callback=None):
+        async def call_tool(self, name, arguments, *, options=None):
             raise AssertionError("not used")
 
         async def close(self):
@@ -193,7 +193,7 @@ async def test_remote_failed_background_connect_retries_without_get_tools_trigge
                 )
             ]
 
-        async def call_tool(self, name, arguments, *, progress_callback=None):
+        async def call_tool(self, name, arguments, *, options=None):
             raise AssertionError("not used")
 
         async def close(self):
