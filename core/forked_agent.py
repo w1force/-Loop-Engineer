@@ -2,19 +2,33 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
-from typing import TYPE_CHECKING, Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Literal
 
 from .lsp.constants import LSP_TOOL_NAME
 from .tools import CanUseDecision, default_can_use_tool
-from .types import AgentState, Message, Terminal, TerminalReason, UserMessage
+from .types import (
+    AgentState,
+    AssistantMessage,
+    Message,
+    Terminal,
+    TerminalReason,
+    TextBlock,
+    Usage,
+    UserMessage,
+)
 
 if TYPE_CHECKING:
     from telemetry.tracer import Tracer
 
     from .loop.orchestrator import QueryParams
+    from .tools import Tool
 
 logger = logging.getLogger("forked_agent")
+
+SubagentContextMode = Literal["fork", "fresh"]
 
 
 class ForkedAgentError(RuntimeError):
@@ -23,6 +37,26 @@ class ForkedAgentError(RuntimeError):
     def __init__(self, terminal: Terminal):
         super().__init__(terminal.error or terminal.reason.value)
         self.terminal = terminal
+
+
+@dataclass(frozen=True)
+class SubagentRunResult:
+    """一次隔离子 Agent 运行的结果。"""
+
+    agent_state: AgentState
+    terminal: Terminal
+    final_text: str
+    usage: Usage
+    context_mode: SubagentContextMode
+    model: str
+    error: str | None = None
+
+    @property
+    def successful(self) -> bool:
+        return (
+            self.terminal.reason is TerminalReason.COMPLETED
+            and self.error is None
+        )
 
 
 def _fork_can_use_tool(parent_can_use_tool: Callable) -> Callable:
@@ -43,6 +77,141 @@ def _fork_can_use_tool(parent_can_use_tool: Callable) -> Callable:
     return can_use_tool
 
 
+def _assistant_text(messages: list[Message]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        text = "".join(
+            block.text
+            for block in message.content
+            if isinstance(block, TextBlock)
+        ).strip()
+        if text:
+            return text
+    return ""
+
+
+def _assistant_usage(messages: list[Message]) -> Usage:
+    usage = Usage()
+    for message in messages:
+        if not isinstance(message, AssistantMessage) or message.usage is None:
+            continue
+        usage.input_tokens += message.usage.input_tokens
+        usage.output_tokens += message.usage.output_tokens
+    return usage
+
+
+async def run_subagent(
+    *,
+    parent_agent_state: AgentState,
+    parent_params: "QueryParams",
+    task_prompt: str,
+    tracer: "Tracer",
+    context_mode: SubagentContextMode = "fork",
+    context_messages: list[Message] | None = None,
+    system_override: str | list[dict] | None = None,
+    tools_override: list["Tool"] | None = None,
+    cwd_override: str | None = None,
+    transcript_path: str | None = None,
+    can_use_tool: Callable = default_can_use_tool,
+    max_turns: int = 5,
+    abort_signal: asyncio.Event | None = None,
+    propagate_errors: bool = False,
+) -> SubagentRunResult:
+    """运行复用主 query_loop、但拥有独立上下文的子 Agent。
+
+    ``fork`` 复制父消息；``fresh`` 只保留调用方传入的任务 prompt。模型、
+    provider 和 token 上限继承父 loop，system、tools、cwd 与权限可以收窄。
+    """
+    from .loop.orchestrator import QueryParams, query_loop
+
+    if context_mode not in {"fork", "fresh"}:
+        raise ValueError(f"unknown subagent context mode: {context_mode}")
+    if context_mode == "fresh":
+        if context_messages is not None:
+            raise ValueError("fresh subagent cannot receive parent context_messages")
+        inherited_messages: list[Message] = []
+    else:
+        inherited_messages = (
+            context_messages
+            if context_messages is not None
+            else parent_agent_state.messages
+        )
+
+    child_messages: list[Message] = [
+        *inherited_messages,
+        UserMessage(content=task_prompt),
+    ]
+    initial_message_count = len(child_messages)
+    child_state = AgentState(
+        messages=child_messages,
+        skills=[],
+        cwd=cwd_override or parent_agent_state.cwd,
+    )
+    child_params = QueryParams(
+        system=(
+            system_override
+            if system_override is not None
+            else parent_params.system
+        ),
+        model=parent_params.model,
+        max_tokens=parent_params.max_tokens,
+        provider=parent_params.provider,
+        abort_signal=abort_signal or asyncio.Event(),
+        tools=(
+            tools_override
+            if tools_override is not None
+            else parent_params.tools
+        ),
+        max_turns=max_turns,
+        can_use_tool=_fork_can_use_tool(can_use_tool),
+        tool_execution_mode=parent_params.tool_execution_mode,
+        transcript_path=transcript_path,
+        verification_agent_max_turns=parent_params.verification_agent_max_turns,
+        enable_compact=False,
+    )
+
+    terminal = Terminal(reason=TerminalReason.COMPLETED)
+    error: str | None = None
+    try:
+        async for item in query_loop(child_state, child_params, tracer):
+            if isinstance(item, Terminal):
+                terminal = item
+        if terminal.reason is not TerminalReason.COMPLETED:
+            raise ForkedAgentError(terminal)
+    except Exception as exc:  # noqa: BLE001
+        if propagate_errors:
+            raise
+        error = str(exc)
+        if terminal.reason is TerminalReason.COMPLETED:
+            terminal = Terminal(
+                reason=TerminalReason.MODEL_ERROR,
+                error=error,
+            )
+        logger.warning("subagent [%s] failed: %s", parent_params.model, exc)
+    finally:
+        if transcript_path is not None:
+            from .transcript import record_transcript
+
+            transcript = Path(transcript_path)
+            try:
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+                await record_transcript(child_state.messages, transcript)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("subagent transcript write failed: %s", exc)
+
+    child_output = child_state.messages[initial_message_count:]
+    return SubagentRunResult(
+        agent_state=child_state,
+        terminal=terminal,
+        final_text=_assistant_text(child_output),
+        usage=_assistant_usage(child_output),
+        context_mode=context_mode,
+        model=parent_params.model,
+        error=error,
+    )
+
+
 async def run_forked_agent(
     *,
     parent_agent_state: AgentState,
@@ -55,58 +224,26 @@ async def run_forked_agent(
     abort_signal: asyncio.Event | None = None,
     propagate_errors: bool = False,
 ) -> AgentState:
-    """跑一个隔离子 agent:复用父的 cache-safe 参数 + 父对话副本 + task_prompt,复用 query_loop。
-
-    - system / tools / model / provider / max_tokens 全部**沿用父的 parent_params**。
-    - task_prompt 作为一条 user 消息追加在父对话之后。
-    - can_use_tool:权限函数,限制 fork 能动什么(如只放行编辑笔记文件);默认放行一切。
-    - max_turns:fork 用小上限(默认 5);默认独立 abort;enable_compact=False。
-      Full compact 可显式复用父 abort,并要求错误向上抛以执行 fallback。
-
-    返回子 agent 的隔离 AgentState(供检查/测试);fire-and-forget 调用方可忽略返回值。
-    子 agent 异常被吞并记日志,不拖垮父 loop。绝不触碰 parent_agent_state。
-    """
-    # 延迟 import:避免 core.forked_agent 与 loop.orchestrator 在模块加载期成环。
-    from .loop.orchestrator import QueryParams, query_loop
-
-    # 父 messages 浅拷贝 + 追加任务 prompt;fork 用全新 list,extend/append 只动 fork 自己。
-    # 浅拷贝安全的前提是 fork 不就地改共享对象 —— 故下方 enable_compact=False 关掉会就地改
-    # tool_result 内容的时间式 microcompact。
-    fork_messages: list[Message] = [
-        *(fork_context_messages if fork_context_messages is not None else parent_agent_state.messages),
-        UserMessage(content=task_prompt),
-    ]
-    fork_state = AgentState(
-        messages=fork_messages,
-        skills=[],                        # 子 agent 不需要 skill 目录(inject_skill_listing 自然 no-op)
-        cwd=parent_agent_state.cwd,
+    """兼容旧 fork API；fresh 子 Agent 应调用 ``run_subagent``。"""
+    result = await run_subagent(
+        parent_agent_state=parent_agent_state,
+        parent_params=parent_params,
+        task_prompt=task_prompt,
+        tracer=tracer,
+        context_mode="fork",
+        context_messages=fork_context_messages,
+        can_use_tool=can_use_tool,
+        max_turns=max_turns,
+        abort_signal=abort_signal,
+        propagate_errors=propagate_errors,
     )
+    return result.agent_state
 
-    # 复用父的 cache-key 字段(system/tools/model/provider/max_tokens)→ 命中父缓存;
-    # 仅覆盖 fork 专属项(独立 abort、小 max_turns、权限函数、关 microcompact)。
-    fork_params = QueryParams(
-        system=parent_params.system,                       # ★ 父的 system(缓存前缀一致)
-        model=parent_params.model,                         # ★ 父的 model
-        max_tokens=parent_params.max_tokens,               # ★ 父的 max_tokens
-        provider=parent_params.provider,                   # ★ 父的 provider
-        abort_signal=abort_signal or asyncio.Event(),
-        tools=parent_params.tools,                         # ★ 父的 tools 全集(缓存 tools 段一致)
-        max_turns=max_turns,                               # fork 用小上限
-        can_use_tool=_fork_can_use_tool(can_use_tool),     # ★ fork 权限层限制(LSP 仅主 agent)
-        tool_execution_mode=parent_params.tool_execution_mode,
-        enable_compact=False,                              # ★ fork 内关 microcompact
-    )
 
-    try:
-        terminal: Terminal | None = None
-        async for item in query_loop(fork_state, fork_params, tracer):
-            if isinstance(item, Terminal):
-                terminal = item
-        if terminal is not None and terminal.reason is not TerminalReason.COMPLETED:
-            raise ForkedAgentError(terminal)
-    except Exception as e:  # noqa: BLE001 —— 子 agent 失败不应拖垮父 loop
-        if propagate_errors:
-            raise
-        logger.warning("forked agent [%s] failed: %s", parent_params.model, e)
-
-    return fork_state
+__all__ = [
+    "ForkedAgentError",
+    "SubagentContextMode",
+    "SubagentRunResult",
+    "run_forked_agent",
+    "run_subagent",
+]

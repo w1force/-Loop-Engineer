@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     debug_sse: bool = False  # LOOP_ENGINEER_DEBUG_SSE=true 时打印原始 SSE 流
     run_log_enabled: bool = True  # ★ 结构化运行日志(FileTracer 写 JSONL, jq 可查)
     run_log_path: str | None = None  # None → FileTracer 默认 logs/{时间戳}.jsonl;设了则原样用(不拼接)
+    verification_agent_enabled: bool = True
+    verification_agent_max_turns: int = 10
 
 
 def get_settings() -> Settings:

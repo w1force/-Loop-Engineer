@@ -75,6 +75,8 @@ class AgentConfig:
     skill_dirs: list[str] = field(default_factory=lambda: ["skills/"])
     cwd: str = field(default_factory=os.getcwd)   # ★ Task 4 新增
     mcp_manager: ToolProvider | None = None
+    verification_agent_enabled: bool = False
+    verification_agent_max_turns: int = 10
 
     async def resolve_tools(self) -> list[Tool]:
         """组合内置工具、调用方显式工具和 MCP 工具。
@@ -84,7 +86,10 @@ class AgentConfig:
         """
         # 对齐 Claude Code 的思路:QueryEngine/agent_loop 不关心 MCP client 怎么连,
         # 只在发模型请求前拿到一份完整工具池。这样 provider 和 executor 仍只认 Tool。
-        base_tools = get_tools(False) + list(self.tools)
+        base_tools = get_tools(
+            False,
+            include_agent=self.verification_agent_enabled,
+        ) + list(self.tools)
         mcp_tools = await self.mcp_manager.get_tools() if self.mcp_manager else []
         return assemble_tool_pool(base_tools, mcp_tools)
 
@@ -135,6 +140,10 @@ def build_system_prompt(agent_state: AgentState, config: AgentConfig) -> str | l
             "需要用到某个 skill 时,先查看该列表确定 skill 名,再调用 Load_Skill(name) 加载其"
             "完整指令后执行。重要:只使用列表中列出的 skill,不要臆造或猜测 skill 名。"
         )
+    if config.verification_agent_enabled:
+        from .agents.verification import VERIFICATION_MAIN_AGENT_GUIDANCE
+
+        guidance += VERIFICATION_MAIN_AGENT_GUIDANCE
     if isinstance(config.system, str):
         return config.system + guidance
     return [*config.system, {"type": "text", "text": guidance}]
@@ -226,6 +235,7 @@ async def submit(
         can_use_tool=config.can_use_tool,
         tool_execution_mode=config.tool_execution_mode,
         transcript_path=config.transcript_path,
+        verification_agent_max_turns=config.verification_agent_max_turns,
     )
 
     last_stop_reason: str | None = None

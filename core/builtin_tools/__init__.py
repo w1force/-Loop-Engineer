@@ -11,9 +11,11 @@ from .write import WRITE_TOOL
 from .read import READ_TOOL
 from .bash import BASH_TOOL
 from .lsp import LSP_TOOL
+from .agent import AGENT_TOOL
 
 __all__ = [
     "BASH_TOOL",
+    "AGENT_TOOL",
     "EDIT_TOOL",
     "GLOB_TOOL",
     "GREP_TOOL",
@@ -22,4 +24,3 @@ __all__ = [
     "WRITE_TOOL",
     "LOAD_SKILL_TOOL"
 ]
-

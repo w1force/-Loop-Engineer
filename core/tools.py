@@ -20,6 +20,7 @@ from .types import TextBlock, ToolUseBlock
 
 if TYPE_CHECKING:
     from .file_state import FileStateCache
+    from .loop.orchestrator import QueryParams
     from .types import AgentState, QueryState
 
 
@@ -39,6 +40,7 @@ class ToolContext:
     abort_signal: asyncio.Event
     agent_state: "AgentState | None" = None  # 跨 submit(工具取 skills/cwd);测试可省略
     query_state: "QueryState | None" = None  # 单轮(原 state 改名);测试/轻量工具可省略
+    query_params: "QueryParams | None" = None  # 当前 loop 参数;Agent 工具用它启动隔离子 loop
     read_file_state: "FileStateCache | None" = None
 
     def __post_init__(self) -> None:
