@@ -67,6 +67,8 @@ async def demo_real_llm():
         tools=build_tools(),
         tool_execution_mode="streaming",
         transcript_path="run.transcript.jsonl",
+        verification_agent_enabled=s.verification_agent_enabled,
+        verification_agent_max_turns=s.verification_agent_max_turns,
     )
     user_input = "帮我读 a、b、c 三个 key,然后把结果汇总写到 x"
     agent_state = build_agent_state(config)
@@ -91,6 +93,8 @@ async def real_tool_demo():
         max_turns=s.max_turns,
         tool_execution_mode="streaming",
         transcript_path="run.transcript.jsonl",
+        verification_agent_enabled=s.verification_agent_enabled,
+        verification_agent_max_turns=s.verification_agent_max_turns,
     )
     user_input = "审计一下我项目中关于工具调用的实现方式，然后在tests文件夹下面写一个demo版"
     astate = build_agent_state(config)

@@ -39,6 +39,28 @@ uv run python main.py
 
 埋点序列 `TURN_START → PROVIDER_REQUEST → STREAM_END → TRANSITION(completed)` 即 Phase 1 DoD。换 `NoopTracer()` 可静默埋点。对话记录落盘到 `run.transcript.jsonl`。
 
+## Verification Agent
+
+默认入口启用 Claude Code 风格的同步 Verification Agent。主 Agent 完成非平凡代码
+修改后调用：
+
+```json
+{
+  "description": "verify timeout fix",
+  "prompt": "原始需求、全部改动文件、实现方案和可选 plan 路径",
+  "subagent_type": "verification"
+}
+```
+
+Verifier 使用 fresh context、继承主模型和 cwd，只获得 `Read/Glob/Grep/Bash`，自行
+发现并执行构建、测试、lint、typecheck 和对抗性命令。最终文本报告作为普通
+`tool_result` 回到主 Agent；`VERDICT: PASS|FAIL|PARTIAL` 不做机器解析或硬门禁。
+
+- `LOOP_ENGINEER_VERIFICATION_AGENT_ENABLED=True`：是否向主 Agent 注册 `Agent` 工具
+- `LOOP_ENGINEER_VERIFICATION_AGENT_MAX_TURNS=10`：Verifier 最大工具回灌轮数
+
+当前实现是同步调用，不包含 Claude Code 的后台通知和 transcript resume。
+
 ## 测试
 
 ```bash

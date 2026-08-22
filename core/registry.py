@@ -9,6 +9,7 @@ plan 模式 / MCP 动态接入等非核心内容暂不实现。
 from __future__ import annotations
 
 from .builtin_tools import (
+    AGENT_TOOL,
     BASH_TOOL,
     EDIT_TOOL,
     GLOB_TOOL,
@@ -33,14 +34,21 @@ _BASE_TOOLS: list[Tool] = [
 ]
 
 
-def get_all_base_tools() -> list[Tool]:
+def get_all_base_tools(*, include_agent: bool = False) -> list[Tool]:
     """返回内置工具全集。"""
-    return list(_BASE_TOOLS)
+    tools = list(_BASE_TOOLS)
+    if include_agent:
+        tools.append(AGENT_TOOL)
+    return tools
 
 
-def get_tools(read_only_only: bool = False) -> list[Tool]:
+def get_tools(
+    read_only_only: bool = False,
+    *,
+    include_agent: bool = False,
+) -> list[Tool]:
 
-    tools = get_all_base_tools()
+    tools = get_all_base_tools(include_agent=include_agent)
     if read_only_only:
         tools = [t for t in tools if t.is_concurrency_safe]
     return tools

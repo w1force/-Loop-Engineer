@@ -52,6 +52,7 @@ class QueryParams:
     can_use_tool: Callable = default_can_use_tool
     tool_execution_mode: Literal["streaming", "batch"] = "streaming"  # Task 7 新增
     transcript_path: str | None = None
+    verification_agent_max_turns: int = 10
     # 是否在每轮进循环前跑 microcompact(默认开)。forked agent 置 False:
     # 关掉会就地改 tool_result 内容的时间式 microcompact,避免污染父共享的消息对象。
     enable_compact: bool = True
@@ -96,6 +97,8 @@ async def query_loop(
             tracer=tracer,
             abort_signal=params.abort_signal,
             agent_state=agent_state,
+            query_state=state,
+            query_params=params,
         )
         executor = make_executor(
             params.tool_execution_mode, params.tools, params.can_use_tool, tracer, ctx
