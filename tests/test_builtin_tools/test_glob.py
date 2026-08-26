@@ -29,6 +29,19 @@ async def test_glob_relative_paths(tmp_path):
     assert result.rstrip().endswith("a.py")  # 实现不相对化(对齐 CC 砍掉路径相对化),cwd 为绝对时返回绝对路径;校验末尾文件名
 
 
+async def test_glob_explicit_relative_root_uses_agent_cwd(tmp_path):
+    workspace = tmp_path / "candidate"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "a.py").write_text("x")
+    agent_state = AgentState(cwd=str(workspace))
+
+    result = await GLOB_TOOL.func(
+        GlobInput(pattern="*.py", path="src"), _ctx(agent_state)
+    )
+
+    assert result.rstrip().endswith("src/a.py")
+
+
 async def test_glob_excludes_git(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "config").write_text("x")

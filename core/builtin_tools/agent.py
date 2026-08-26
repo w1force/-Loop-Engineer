@@ -28,8 +28,9 @@ class AgentInput(BaseModel):
     prompt: str = Field(
         min_length=1,
         description=(
-            "完整任务说明。verification 必须包含原始需求、所有改动文件、实现方案"
-            "和可选 plan 路径；不要附带主 Agent 自己的测试结论。"
+            "完整任务说明。verification 必须包含原始需求、candidate diff、所有改动"
+            "文件、实现方案、相关测试入口和可选 plan 路径；不要附带主 Agent 自己的"
+            "测试结论。"
         ),
     )
     subagent_type: Literal["verification"] = Field(

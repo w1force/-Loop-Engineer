@@ -1,0 +1,55 @@
+{
+  "schema_version": "verification-policy/v1",
+  "lint": {
+    "checks": [
+      {
+        "id": "ccb-lint",
+        "argv": ["bun", "run", "lint"],
+        "timeout_ms": 300000,
+        "expected_exit_code": 0
+      }
+    ]
+  },
+  "unit": {
+    "scope": "full",
+    "checks": [
+      {
+        "id": "ccb-full-unit-suite",
+        "argv": ["bun", "test"],
+        "timeout_ms": 900000,
+        "expected_exit_code": 0
+      }
+    ]
+  },
+  "trace": {
+    "expected_model": "CONFIGURE_EXPECTED_CCB_MODEL",
+    "max_input_tokens": 150000,
+    "allowed_fallback_scenarios": []
+  },
+  "staging_log": {
+    "error_levels": ["ERROR", "FATAL"]
+  },
+  "behavior": {
+    "scenarios": [
+      {
+        "scenario_id": "ccb-regression:incident-reproducer",
+        "expected_control_outcome": "failure",
+        "expected_candidate_outcome": "success",
+        "allowed_changed_paths": ["$.status", "$.result", "$.error"],
+        "required_changed_paths": ["$.status"],
+        "forbidden_changed_paths": ["@model", "@tool_calls", "@finished"],
+        "reproducer": true,
+        "require_trace_shape": true
+      }
+    ]
+  },
+  "ui": {
+    "mode": "not_applicable",
+    "not_applicable_reason": "仅适用于经审核确认不影响 CCB 终端 UI 的修复"
+  },
+  "required_skills_by_rule": {
+    "CONFIGURE_MATCHED_RULE": ["ccb-regression"]
+  },
+  "sandbox_mode": "required",
+  "evidence_timeout_ms": 120000
+}

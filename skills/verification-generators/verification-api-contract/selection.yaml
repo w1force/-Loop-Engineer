@@ -1,0 +1,68 @@
+name: verification-api-contract
+scenarios:
+  - id: api-contract-regression
+    when:
+      matched_rules:
+        - api-contract-drift
+        - http-api-regression
+        - response-schema-regression
+      changed_paths:
+        - "**/openapi.{yaml,yml,json}"
+        - "**/swagger.{yaml,yml,json}"
+        - "**/{routes,routers,handlers,controllers}/**"
+      risk_tags:
+        - api
+        - contract
+        - schema
+        - status-code
+    selection_prompt: |
+      Generate a frozen HTTP/OpenAPI regression suite for the affected operations. Bind
+      every request and assertion to the canonical specification and incident evidence;
+      include every documented 2xx, 3xx, 4xx, 5xx, wildcard, and default response or emit a
+      blocking obligation with the exact missing fixture or fault-injection capability.
+    exclusions:
+      - The changed interface is GraphQL, gRPC, MCP, a browser UI, or a data pipeline rather than HTTP/OpenAPI.
+      - No trusted canonical API specification is available.
+      - The only reachable target is production or another mutable shared environment.
+  - id: api-input-boundaries
+    when:
+      matched_rules:
+        - request-validation-regression
+        - serialization-regression
+      changed_paths:
+        - "**/{schemas,validators,serializers,deserializers}/**"
+        - "**/*openapi*"
+      risk_tags:
+        - boundary
+        - validation
+        - parsing
+        - serialization
+    selection_prompt: |
+      Generate deterministic boundary tests from the frozen request schema: required versus
+      missing, nullability, enum membership, numeric and length limits, array cardinality,
+      patterns, formats, media types, and each oneOf/anyOf discriminator branch. Pair every
+      invalid input with an independently sourced error oracle.
+    exclusions:
+      - The changed code cannot affect externally observable HTTP request validation.
+      - Required external schema references are unresolved or mutable.
+  - id: api-state-and-idempotency
+    when:
+      matched_rules:
+        - api-side-effect-regression
+        - api-idempotency-regression
+      changed_paths:
+        - "**/{commands,mutations,services,repositories}/**"
+        - "**/*idempot*"
+      risk_tags:
+        - side-effect
+        - idempotency
+        - retry
+        - mutation
+    selection_prompt: |
+      Generate isolated state-transition tests with explicit pre-state and post-state
+      oracles, deterministic identifiers, duplicate-request or retry checks where the
+      contract promises idempotency, and unconditional cleanup whose postconditions prove
+      that generated state was removed.
+    exclusions:
+      - Every affected operation is read-only and has no externally observable state transition.
+      - The environment cannot provide isolated fixtures or independently inspect resulting state.

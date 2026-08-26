@@ -1,0 +1,63 @@
+name: verification-property-oracle
+scenarios:
+  - id: pure-property-oracle
+    when:
+      matched_rules:
+        - boundary-regression
+        - parser-regression
+        - serialization-regression
+        - algorithm-regression
+      changed_paths:
+        - "**/*.py"
+        - "**/*.ts"
+        - "**/*.js"
+        - "**/*.rs"
+        - "**/*.go"
+        - "**/*.java"
+      risk_tags:
+        - property-based
+        - parser
+        - serializer
+        - validator
+        - numeric-boundary
+      require_any:
+        - matched_rule
+        - risk_tag
+    selection_prompt: |
+      Select this scenario when the changed code exposes a pure or isolatable input
+      domain and supports a grounded roundtrip, reference oracle, invariant,
+      idempotence, order, identity, or conservation property. Generate constrained
+      values, fixed boundary examples, deterministic seeds, and replayable minimized
+      counterexamples using the repository's approved test library.
+    exclusions:
+      - Only a no-crash property can be stated
+      - End-to-end UI, performance, or coverage-guided binary fuzzing
+      - The property would merely reimplement the candidate algorithm
+      - Adding the required dependency is not pre-approved
+  - id: isolated-state-invariant
+    when:
+      matched_rules:
+        - state-machine-regression
+        - invariant-violation
+      changed_paths:
+        - "**/*.py"
+        - "**/*.ts"
+        - "**/*.rs"
+        - "**/*.go"
+        - "**/*.sol"
+      risk_tags:
+        - stateful-property
+        - invariant
+        - smart-contract
+      require_any:
+        - matched_rule
+        - risk_tag
+    selection_prompt: |
+      Select this scenario when behavior depends on a generated sequence of operations
+      over an isolated state machine. Generate valid action sequences, preconditions,
+      invariants, bounded execution and a persistent replay corpus. Keep external I/O
+      outside the property or replace it with a trusted deterministic model.
+    exclusions:
+      - State transitions require a shared production service
+      - No resettable initial state or bounded cleanup exists
+      - Solidity reachability or coverage cannot be observed

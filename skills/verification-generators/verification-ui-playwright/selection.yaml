@@ -1,0 +1,103 @@
+name: verification-ui-playwright
+scenarios:
+  - id: ui-functional-regression
+    when:
+      matched_rules:
+        - ui-functional-regression
+        - browser-flow-regression
+      changed_paths:
+        - "**/ui/**"
+        - "**/web/**"
+        - "**/frontend/**"
+        - "**/*.{tsx,jsx,vue,svelte,html}"
+      risk_tags:
+        - ui
+        - navigation
+        - user-journey
+        - accessibility
+    selection_prompt: >-
+      Generate independent Playwright tests for the affected user journey using
+      trusted Incident, product-contract or control expectations. Cover the
+      incident reproducer, successful path, navigation and observable
+      accessibility state. Use semantic locators and explicit assertions; record
+      an oracle source for every expected outcome.
+    exclusions:
+      - Purely visual preference or design review without a machine-verifiable contract.
+      - Backend-only changes with no browser-visible behavior.
+      - Expectations inferred from the candidate DOM, screenshot or response.
+  - id: ui-validation-boundary
+    when:
+      matched_rules:
+        - ui-input-validation
+        - ui-boundary-regression
+      changed_paths:
+        - "**/form*/**"
+        - "**/*validation*"
+        - "**/*schema*"
+        - "**/*.{tsx,jsx,vue,svelte,html}"
+      risk_tags:
+        - validation
+        - boundary
+        - negative-flow
+        - error-state
+    selection_prompt: >-
+      Generate deterministic Playwright cases for required, empty, malformed,
+      minimum, maximum and over-limit input plus server rejection. Assert visible
+      and accessible error state, submitted request shape, retained or cleared
+      values, and absence of forbidden side effects. Obtain every expected value
+      from a trusted source rather than candidate behavior.
+    exclusions:
+      - Property fuzzing whose output cannot be replayed with a fixed seed and corpus.
+      - Validation rules not present in the Incident, approved contract or bound control.
+      - Tests implemented only as screenshots with no structured assertion.
+  - id: ui-state-and-side-effects
+    when:
+      matched_rules:
+        - ui-state-regression
+        - ui-side-effect-regression
+      changed_paths:
+        - "**/state/**"
+        - "**/store/**"
+        - "**/router/**"
+        - "**/*storage*"
+        - "**/*request*"
+      risk_tags:
+        - persistence
+        - storage
+        - network-side-effect
+        - console-error
+        - retry
+    selection_prompt: >-
+      Generate isolated Playwright tests for reload and navigation persistence,
+      cookies and browser storage, network request count and payload, retry or
+      duplicate submission, and unexpected console or page errors. Use frozen
+      fixtures and network mocks, clear state per test and assert both required
+      effects and forbidden extra effects.
+    exclusions:
+      - Tests against production accounts, production endpoints or shared mutable data.
+      - Reused authenticated browser profiles containing unredacted credentials.
+      - Timing assertions based on fixed sleeps rather than observable readiness.
+  - id: ui-browser-matrix
+    when:
+      matched_rules:
+        - ui-browser-compatibility
+        - ui-responsive-regression
+      changed_paths:
+        - "**/*.{css,scss,less}"
+        - "**/layout/**"
+        - "**/responsive/**"
+        - "**/playwright.config.*"
+      risk_tags:
+        - cross-browser
+        - responsive
+        - viewport
+        - rendering
+    selection_prompt: >-
+      Generate a bounded browser and viewport matrix using pinned browser builds.
+      Reuse the same semantic assertions across projects, add only contract-backed
+      viewport-specific expectations, and capture traces or screenshots as
+      secondary evidence. Define an explicit policy for any unsupported browser.
+    exclusions:
+      - Unbounded device or browser enumeration.
+      - Pixel-perfect snapshots without a reviewed baseline and normalization policy.
+      - Browser binaries downloaded dynamically during verification.

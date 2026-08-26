@@ -44,6 +44,21 @@ async def test_write_new_file_without_read(tmp_path):
     assert ctx.agent_state.file_read_state.get(str(f)) is not None
 
 
+async def test_write_resolves_relative_path_from_agent_cwd(tmp_path):
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    ctx = ToolContext(
+        tracer=NoopTracer(),
+        abort_signal=asyncio.Event(),
+        agent_state=AgentState(cwd=str(workspace)),
+    )
+
+    await _write_func(WriteInput(file_path="created.txt", content="candidate\n"), ctx)
+
+    assert (workspace / "created.txt").read_text() == "candidate\n"
+    assert not (tmp_path / "created.txt").exists()
+
+
 async def test_write_creates_parent_dirs(tmp_path):
     f = tmp_path / "sub" / "dir" / "a.txt"
     ctx = _ctx()

@@ -35,6 +35,8 @@ class TraceKind(str, Enum):
     TOOL_INPUT_MALFORMED = "tool_input_malformed"  # ★ LLM 返回的 tool_use input 不是合法 object,被兜底成 {}
     # ── 运行级 ──
     RUN_ERROR = "run_error"  # ★ agent loop 未捕获异常兜底(submit try/except)
+    VERIFICATION_START = "verification_start"
+    VERIFICATION_END = "verification_end"
 
 
 class TraceEvent(BaseModel):

@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..file_state import expand_path
 from ..tools import ToolContext, build_tool
 from .ripgrep import rip_grep
 
@@ -61,9 +62,13 @@ class GrepInput(BaseModel):
 
 
 async def _grep_func(inp: GrepInput, ctx: ToolContext) -> str:
+    search_root = expand_path(
+        inp.path or ctx.agent_state.cwd,
+        cwd=ctx.agent_state.cwd,
+    )
     lines = await grep(
         pattern=inp.pattern,
-        path=inp.path or ctx.agent_state.cwd,
+        path=search_root,
         glob=inp.glob,
         output_mode=inp.output_mode,
         case_insensitive=inp.case_insensitive,
