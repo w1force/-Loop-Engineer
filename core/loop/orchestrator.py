@@ -89,7 +89,7 @@ async def query_loop(
         if params.enable_compact:
             state = await maybe_compact(agent_state, state, params, tracer)
 
-        # 对齐 CC getLSPDiagnosticAttachments：仅主 Agent 在每次请求模型前，
+        # 仅主 Agent 在每次请求模型前，
         # 把异步 publishDiagnostics 作为 system-reminder 追加进本轮上下文。
         inject_lsp_diagnostic_message(agent_state, params.tools)
 
@@ -215,7 +215,7 @@ async def query_loop(
                 }
             )
             if state.turn_count > params.max_turns:
-                # 对齐 CC:max_turns 是"异常终止",yield 显式信号让外层出 error_max_turns
+                # max_turns 是"异常终止",yield 显式信号让外层出 error_max_turns
                 # (绕过 is_result_successful);正常完成则不发信号。
                 _emit_transition(tracer, Terminal(reason=TerminalReason.MAX_TURNS))
                 yield Terminal(reason=TerminalReason.MAX_TURNS)
@@ -226,7 +226,7 @@ async def query_loop(
         decision = await chain.handle(state, outcome, params, tracer)
         _emit_transition(tracer, decision.transition)
         if isinstance(decision.transition, Terminal):
-            # 对齐 CC:正常完成(COMPLETED)不发信号 → 交外层 is_result_successful 判定;
+            # 正常完成(COMPLETED)不发信号 → 交外层 is_result_successful 判定;
             # 异常终止(model_error / prompt_too_long 等)才 yield,让外层出专属错误 subtype。
             if decision.transition.reason is not TerminalReason.COMPLETED:
                 yield decision.transition

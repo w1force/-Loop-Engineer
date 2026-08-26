@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import logging
 import os
-from typing import TYPE_CHECKING, Callable, Literal, Protocol
+from typing import Callable, Literal, Protocol
 import traceback
 
 from core.lsp import create_lsp_server_manager, default_lsp_server_configs
@@ -43,14 +43,6 @@ from .types import (
 )
 from telemetry.events import TraceEvent, TraceKind
 from telemetry.tracer import Tracer
-
-if TYPE_CHECKING:
-    from core.verification.coordinator import (
-        CoordinatorRunRequest,
-        EscalationHandler,
-        VerificationCoordinator,
-        VerifiedReleaseAction,
-    )
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +78,6 @@ class AgentConfig:
     mcp_manager: ToolProvider | None = None
     verification_agent_enabled: bool = False
     verification_agent_max_turns: int = 10
-    verification_coordinator: "VerificationCoordinator | None" = None
-    verification_run_request: "CoordinatorRunRequest | None" = None
-    verification_release_action: "VerifiedReleaseAction | None" = None
-    verification_escalation_handler: "EscalationHandler | None" = None
 
     async def resolve_tools(self) -> list[Tool]:
         """组合内置工具、调用方显式工具和 MCP 工具。
@@ -226,17 +214,11 @@ async def submit(
     故本函数对 AssistantMessage 不再 append(否则重复)。
     Task 4: system 用 build_system_prompt(替 prepare_skills);
     budget 累积到 agent_state.total_*_tokens(跨 submit 持久)。
-    """
-    if (
-        config.verification_coordinator is not None
-        or config.verification_run_request is not None
-    ):
-        async for result in _submit_with_verification_coordinator(
-            prompt, agent_state, config, tracer
-        ):
-            yield result
-        return
 
+    注:事故修复工作流(诊断→修复→验证→发布)不再经过 submit()。它由
+    core.orchestrator.loop_engineer.LoopEngineer 独立驱动;submit() 回归为纯粹的
+    通用 Agent 会话执行内核(Repair 阶段正是复用这一内核)。
+    """
     agent_state.messages.append(UserMessage(content=prompt))   # ★ 跨 submit 累积
     await record_transcript(agent_state.messages, config.transcript_path)  # 红线#5
 
@@ -320,183 +302,6 @@ async def submit(
         "type": "result",
         "subtype": "success",
         "text": _extract_text(result),
-        "usage": {
-            "input_tokens": agent_state.total_input_tokens,
-            "output_tokens": agent_state.total_output_tokens,
-        },
-    }
-
-
-async def _submit_with_verification_coordinator(
-    prompt: str,
-    agent_state: AgentState,
-    config: AgentConfig,
-    tracer: Tracer,
-) -> AsyncIterator[dict]:
-    """Run the only release-capable path through the trusted Coordinator.
-
-    This mode deliberately does not run the ordinary main query first. Repair,
-    lightweight verification and plan generation each receive fresh structured
-    context from the Coordinator, so a successful ordinary Agent turn can never
-    bypass the machine gates.
-    """
-
-    from .agents.verification_planning import FreshContextVerificationPlanner
-    from .agents.verification_workflow import (
-        FreshContextLightweightVerifier,
-        FreshContextRepairAgent,
-    )
-    from .verification.coordinator import (
-        CoordinatorRunRequest,
-        CoordinatorStatus,
-        VerificationCoordinator,
-    )
-
-    coordinator = config.verification_coordinator
-    request = config.verification_run_request
-    if coordinator is None or request is None:
-        yield {
-            "type": "result",
-            "subtype": "error_verification_setup",
-            "is_error": True,
-            "error": (
-                "verification_coordinator and verification_run_request "
-                "must be configured together"
-            ),
-        }
-        return
-    if type(coordinator) is not VerificationCoordinator:
-        yield {
-            "type": "result",
-            "subtype": "error_verification_setup",
-            "is_error": True,
-            "error": "verification_coordinator must use the built-in implementation",
-        }
-        return
-    try:
-        frozen_request = CoordinatorRunRequest.model_validate_json(
-            request.model_dump_json()
-        )
-    except Exception as exc:
-        yield {
-            "type": "result",
-            "subtype": "error_verification_setup",
-            "is_error": True,
-            "error": f"invalid verification run request: {type(exc).__name__}: {exc}",
-        }
-        return
-
-    agent_state.messages.append(UserMessage(content=prompt))
-    await record_transcript(agent_state.messages, config.transcript_path)
-    tracer.emit(
-        TraceEvent(
-            kind=TraceKind.VERIFICATION_START,
-            payload={
-                "run_id": frozen_request.run_id,
-                "incident_id": frozen_request.incident.incident_id,
-                "max_cycles": frozen_request.max_cycles,
-            },
-        )
-    )
-    try:
-        params = QueryParams(
-            system=build_system_prompt(agent_state, config),
-            model=config.model,
-            max_tokens=config.max_tokens,
-            provider=config.provider,
-            abort_signal=config.abort_signal,
-            tools=await config.resolve_tools(),
-            max_turns=config.max_turns,
-            can_use_tool=config.can_use_tool,
-            tool_execution_mode=config.tool_execution_mode,
-            transcript_path=config.transcript_path,
-            verification_agent_max_turns=config.verification_agent_max_turns,
-        )
-        outcome = await coordinator.run(
-            frozen_request,
-            repair_agent=FreshContextRepairAgent(
-                parent_agent_state=agent_state,
-                parent_params=params,
-                tracer=tracer,
-                workspace_ignore=coordinator.plan_freezer.policy.workspace_ignore,
-                max_turns=config.max_turns,
-            ),
-            lightweight_verifier=FreshContextLightweightVerifier(
-                parent_agent_state=agent_state,
-                parent_params=params,
-                tracer=tracer,
-                workspace_ignore=coordinator.plan_freezer.policy.workspace_ignore,
-                max_turns=config.verification_agent_max_turns,
-            ),
-            planner=FreshContextVerificationPlanner(
-                parent_agent_state=agent_state,
-                parent_params=params,
-                tracer=tracer,
-                generation_skill_catalog=getattr(
-                    coordinator.plan_freezer, "generation_skill_catalog", None
-                ),
-            ),
-            release_action=config.verification_release_action,
-            escalation_handler=config.verification_escalation_handler,
-        )
-    except Exception as exc:
-        tracer.emit(
-            TraceEvent(
-                kind=TraceKind.VERIFICATION_END,
-                payload={
-                    "run_id": frozen_request.run_id,
-                    "status": "error",
-                    "error_type": type(exc).__name__,
-                },
-            )
-        )
-        yield {
-            "type": "result",
-            "subtype": "error_verification",
-            "is_error": True,
-            "error": f"{type(exc).__name__}: {exc}",
-            "usage": {
-                "input_tokens": agent_state.total_input_tokens,
-                "output_tokens": agent_state.total_output_tokens,
-            },
-        }
-        return
-
-    successful = outcome.status in {
-        CoordinatorStatus.VERIFIED,
-        CoordinatorStatus.RELEASED,
-    }
-    subtype = {
-        CoordinatorStatus.VERIFIED: "success",
-        CoordinatorStatus.RELEASED: "success",
-        CoordinatorStatus.RELEASE_BLOCKED: "verification_release_blocked",
-        CoordinatorStatus.ESCALATED: "verification_escalated",
-        CoordinatorStatus.RUNNING: "error_verification",
-    }[outcome.status]
-    payload = outcome.model_dump(mode="json")
-    tracer.emit(
-        TraceEvent(
-            kind=TraceKind.VERIFICATION_END,
-            payload={
-                "run_id": outcome.run_id,
-                "incident_id": outcome.incident_id,
-                "status": outcome.status.value,
-                "cycle": outcome.cycle,
-            },
-        )
-    )
-    yield {
-        "type": "result",
-        "subtype": subtype,
-        "is_error": not successful,
-        "text": (
-            f"verification workflow ended with {outcome.status.value}"
-            if successful
-            else ""
-        ),
-        "error": None if successful else "; ".join(outcome.failures),
-        "verification": payload,
-        "code_fix_verified": successful,
         "usage": {
             "input_tokens": agent_state.total_input_tokens,
             "output_tokens": agent_state.total_output_tokens,
