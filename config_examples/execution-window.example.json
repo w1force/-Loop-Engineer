@@ -7,7 +7,7 @@
   "input_payload": {
     "prompt": "CONFIGURE_NORMALIZED_REPRODUCER_INPUT"
   },
-  "collection_id": "CONFIGURE_UNIQUE_COLLECTION_ID",
+  "collection_id": "CONFIGURE_CANDIDATE_COLLECTION_ID",
   "control_ref": "CONFIGURE_CONTROL_COMMIT_SHA",
   "control_digest": "0000000000000000000000000000000000000000000000000000000000000000",
   "candidate_ref": "CONFIGURE_CANDIDATE_REF",
@@ -28,5 +28,7 @@
     "status": "ok"
   },
   "model": "CONFIGURE_ACTUAL_CCB_MODEL",
-  "tool_calls": []
+  "tool_calls": [],
+  "oracle_digest": "33439f49b86d29ac4ba0162364697d2c95d93de410a065219dc726791ae9af9c",
+  "result_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
 }

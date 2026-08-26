@@ -10,6 +10,7 @@ from .store import (
     ExecutionWindow,
     LocalObservabilityStore,
     ObservabilityStoreError,
+    OtlpFlushBarrier,
     normalized_input_digest,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "ExecutionWindow",
     "LocalObservabilityStore",
     "ObservabilityStoreError",
+    "OtlpFlushBarrier",
     "SQLiteBehaviorEvidenceProvider",
     "SQLiteLogEvidenceProvider",
     "SQLiteTraceEvidenceProvider",

@@ -14,6 +14,7 @@ from pydantic import Field, StrictInt, model_validator
 from .models import (
     BehaviorEvidence,
     LogEvidence,
+    ReplayEvidenceManifest,
     TraceEvidence,
     VerificationModel,
 )
@@ -30,6 +31,7 @@ class EvidenceCollectionContext(VerificationModel):
     skill_names: tuple[str, ...] = Field(min_length=1)
     skill_digests: dict[str, str] = Field(min_length=1)
     scenario_ids: tuple[str, ...] = Field(min_length=1)
+    replay_manifest: ReplayEvidenceManifest
 
     @model_validator(mode="after")
     def _skill_contract_is_complete(self) -> Self:
@@ -44,6 +46,9 @@ class EvidenceCollectionContext(VerificationModel):
             raise ValueError("skill_digests 必须是 SHA-256")
         if len(self.scenario_ids) != len(set(self.scenario_ids)):
             raise ValueError("scenario_ids 不能重复")
+        manifest_scenarios = {item.scenario_id for item in self.replay_manifest.windows}
+        if not set(self.scenario_ids).issubset(manifest_scenarios):
+            raise ValueError("scenario_ids 未由 replay_manifest 覆盖")
         return self
 
 

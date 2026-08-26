@@ -1,0 +1,57 @@
+schema_version: "1"
+name: verification-api-contract
+upstream:
+  repository: https://github.com/pactflow/pactflow-agent-skills.git
+  commit: 89cc20f3ee7165c3c29e9817a1e36bdce563dcec
+  source_path: plugins/swagger-contract-testing/skills/drift-testing
+  license: MIT
+vendored:
+  - source_path: LICENSE
+    destination_path: vendor/pactflow-drift/LICENSE
+    sha256: dd54b486b045a67663601014fe83a7b320b174e6a0a8cc194f4e4c34d8e80ebb
+    modifications:
+      - Normalized the final newline only.
+  - source_path: plugins/swagger-contract-testing/skills/drift-testing/SKILL.md
+    destination_path: SKILL.md
+    sha256: c93ed341f548083e346e88b6d971b72bb51c63e9b46261db9da1d536805e492c
+    modifications:
+      - Reframed the upstream Drift workflow as a generation-only Loop Engineer Skill.
+      - Removed retry-until-pass, live-environment, installation, publishing, and release behavior.
+      - Added the immutable Coordinator handoff and independent-oracle requirements.
+  - source_path: plugins/swagger-contract-testing/skills/drift-testing/references/test-cases.md
+    destination_path: vendor/pactflow-drift/test-cases.md
+    sha256: c16c420ea09d073f3d9ca68077a8f120233543111626c978c68ebc2c9eb331eb
+    modifications:
+      - Retained the Drift file, target, parameter, assertion, dataset, expression, and tag patterns.
+      - Added 3xx, 5xx, wildcard, default, freeze, and independent-oracle requirements.
+      - Removed generic tutorial and unsafe mock-server guidance.
+  - source_path: plugins/swagger-contract-testing/skills/drift-testing/references/auth.md
+    destination_path: vendor/pactflow-drift/auth.md
+    sha256: 2a62a6a47b086faf3c4762ebc92c8e0f49d89be01502ed95ace5052cd6ed11cd
+    modifications:
+      - Retained bearer, basic, API-key, 401, and 403 generation patterns.
+      - Added secret redaction, isolated identity fixtures, and forbidden-side-effect assertions.
+      - Prohibited treating Prism status forcing as authentication evidence.
+  - source_path: plugins/swagger-contract-testing/skills/drift-testing/references/lua-api.md
+    destination_path: vendor/pactflow-drift/lua-api.md
+    sha256: 1b0753cde83ed3709534c4ed8ecf17e8b9280cba8d530dba0fd7eef6eb648dc7
+    modifications:
+      - Retained the lifecycle and HTTP-hook concepts.
+      - Replaced time and random examples with frozen inputs and checked setup/cleanup.
+      - Added failure-path cleanup and independent postcondition requirements.
+  - source_path: plugins/swagger-contract-testing/skills/drift-testing/scripts/extract_endpoints.py
+    destination_path: scripts/inventory_openapi.py
+    sha256: 06014761ee112769e66252946e51e2aec4e731777e3111965eb816a2cbc0fb01
+    modifications:
+      - Reimplemented endpoint extraction as deterministic JSON obligation inventory.
+      - Preserved every 1xx through 5xx, wildcard, and default response key.
+      - Rejected duplicate operation IDs while retaining method and path as canonical identity.
+      - Added boundary, side-effect, and idempotency obligation discovery.
+      - Rejected unresolved remote references instead of fetching mutable content.
+  - source_path: plugins/swagger-contract-testing/skills/drift-testing/scripts/extract_endpoints.py
+    destination_path: scripts/validate_artifact_manifest.py
+    sha256: f2cf024b3e18dafd4c3576e66539ee3d96857b9d51a1f514191cad7fc1d63880
+    modifications:
+      - Added strict schema, artifact, dependency, obligation, oracle, and isolation validation.
+      - Rejected duplicate JSON keys, non-finite numbers, symlinks, special files, and undeclared files.
+      - Recomputed OpenAPI response and category coverage before Coordinator handoff.

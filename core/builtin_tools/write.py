@@ -55,7 +55,7 @@ def _check_optimistic_lock(ctx: ToolContext, path: str, current: str) -> None:
 
 
 async def _write_func(inp: WriteInput, ctx: ToolContext) -> str:
-    path = expand_path(inp.file_path)
+    path = expand_path(inp.file_path, cwd=ctx.agent_state.cwd)
     exists = os.path.exists(path)
 
     # ── 临界区:以下无 await,保证判定→写盘原子 ──

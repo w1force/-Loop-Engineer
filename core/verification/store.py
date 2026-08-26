@@ -16,7 +16,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .models import VerificationReport
+from .models import ReplayEvidenceManifest, VerificationReport
 
 
 class VerificationEvidenceStore(Protocol):
@@ -134,6 +134,12 @@ class VerificationAttestation(BaseModel):
     repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     cycle: int = Field(ge=1, le=3)
+    incident_id: str = Field(min_length=1)
+    incident_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replay_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    replay_manifest: ReplayEvidenceManifest | None = None
+    scenario_input_digests: dict[str, str] = Field(min_length=1)
     candidate_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     skill_digests: dict[str, str] = Field(default_factory=dict)
@@ -149,6 +155,12 @@ class VerificationAttestation(BaseModel):
             for name, digest in self.skill_digests.items()
         ):
             raise ValueError("attestation skill_digests 非法")
+        if any(
+            not scenario_id
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            for scenario_id, digest in self.scenario_input_digests.items()
+        ):
+            raise ValueError("attestation scenario_input_digests 非法")
         return self
 
 
@@ -193,6 +205,16 @@ class AttestedJsonEvidenceStore(JsonEvidenceStore):
             "repository": self.repository,
             "run_id": report.run_id,
             "cycle": report.cycle,
+            "incident_id": report.incident_id,
+            "incident_digest": report.incident_digest,
+            "plan_digest": report.plan_digest,
+            "replay_digest": report.replay_digest,
+            "replay_manifest": (
+                None
+                if report.replay_manifest is None
+                else report.replay_manifest.model_dump(mode="json")
+            ),
+            "scenario_input_digests": report.scenario_input_digests,
             "candidate_digest": report.candidate_digest,
             "policy_digest": report.policy_digest,
             "skill_digests": report.skill_digests,
@@ -230,6 +252,12 @@ class AttestedJsonEvidenceStore(JsonEvidenceStore):
         signing_key: bytes,
         app_id: str,
         repository: str,
+        incident_id: str,
+        incident_digest: str,
+        plan_digest: str,
+        replay_digest: str,
+        replay_manifest: ReplayEvidenceManifest,
+        scenario_input_digests: dict[str, str],
         policy_digest: str,
         skill_digests: dict[str, str],
     ) -> tuple[VerificationReport, str]:
@@ -268,6 +296,12 @@ class AttestedJsonEvidenceStore(JsonEvidenceStore):
             "repository": repository,
             "run_id": run_id,
             "cycle": cycle,
+            "incident_id": incident_id,
+            "incident_digest": incident_digest,
+            "plan_digest": plan_digest,
+            "replay_digest": replay_digest,
+            "replay_manifest": replay_manifest,
+            "scenario_input_digests": scenario_input_digests,
             "policy_digest": policy_digest,
             "skill_digests": skill_digests,
         }
@@ -285,6 +319,13 @@ class AttestedJsonEvidenceStore(JsonEvidenceStore):
         if (
             report.run_id != attestation.run_id
             or report.cycle != attestation.cycle
+            or report.incident_id != attestation.incident_id
+            or report.incident_digest != attestation.incident_digest
+            or report.plan_digest != attestation.plan_digest
+            or report.replay_digest != attestation.replay_digest
+            or report.replay_manifest != attestation.replay_manifest
+            or report.scenario_input_digests
+            != attestation.scenario_input_digests
             or report.candidate_digest != attestation.candidate_digest
             or report.policy_digest != attestation.policy_digest
             or report.skill_digests != attestation.skill_digests

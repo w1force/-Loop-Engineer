@@ -24,6 +24,8 @@ from core.verification import (
     LogEvidence,
     LogGateSpec,
     LogObservation,
+    ReplayEvidenceManifest,
+    ReplayWindowBinding,
     ScenarioCollection,
     ScenarioSpec,
     TraceEvidence,
@@ -41,6 +43,7 @@ from core.verification import (
     VerificationVerdict,
     workspace_digest,
 )
+from core.verification.models import ScenarioAssertionContract
 
 
 TOOL_CALL = ToolCallObservation(
@@ -247,8 +250,84 @@ def _request(
         if skill == "checkout"
         else "d" * 64
     )
+    scenario_ids = {
+        item.scenario_id
+        for item in (engine.policy.behavior.scenarios if engine.policy.behavior else ())
+    }
+    try:
+        loaded = engine.skill_loader.load(skill)
+    except Exception:
+        loaded = None
+    command_steps: dict[str, str] = {}
+    skill_scenario_ids: set[str] = set()
+    if loaded is not None:
+        scenario_ids.update(
+            f"{skill}:{scenario.id}"
+            for scenario in (*loaded.spec.integration, *loaded.spec.ui)
+        )
+        command_steps.update(
+            {
+                f"{skill}:{scenario.id}": scenario.steps[0].id
+                for scenario in (*loaded.spec.integration, *loaded.spec.ui)
+            }
+        )
+        skill_scenario_ids.update(command_steps)
+    if engine.policy.ui is not None and engine.policy.ui.mode == "required":
+        scenario_ids.update(
+            f"global:{scenario.id}" for scenario in engine.policy.ui.global_scenarios
+        )
+        command_steps.update(
+            {
+                f"global:{scenario.id}": scenario.steps[0].id
+                for scenario in engine.policy.ui.global_scenarios
+            }
+        )
+    forbidden_by_scenario = {
+        item.scenario_id: item.forbidden_changed_paths
+        for item in (
+            engine.policy.behavior.scenarios if engine.policy.behavior else ()
+        )
+    }
+    assertion_contracts = tuple(
+        ScenarioAssertionContract(
+            scenario_id=scenario_id,
+            skill_name=skill if scenario_id in skill_scenario_ids else None,
+            forbidden_changed_paths=forbidden_by_scenario.get(scenario_id, ()),
+            regression_assertions=(
+                (command_steps[scenario_id],) if scenario_id in command_steps else ()
+            ),
+            boundary_assertions=(
+                (command_steps[scenario_id],) if scenario_id in command_steps else ()
+            ),
+            side_effect_assertions=(
+                (command_steps[scenario_id],) if scenario_id in command_steps else ()
+            ),
+        )
+        for scenario_id in sorted(scenario_ids)
+    )
     return VerificationRunRequest(
         run_id="run-1",
+        incident_id="incident-1",
+        incident_digest="8" * 64,
+        plan_digest="9" * 64,
+        replay_digest="7" * 64,
+        replay_manifest=ReplayEvidenceManifest(
+            windows=tuple(
+                ReplayWindowBinding(
+                    scenario_id=scenario_id,
+                    variant=variant,
+                    input_digest="a" * 64,
+                    collection_id=f"{scenario_id}-{variant.value}",
+                    otlp_barrier_digest="4" * 64,
+                    oracle_digest="5" * 64,
+                    result_sha256="6" * 64,
+                )
+                for scenario_id in sorted(scenario_ids)
+                for variant in (Variant.CONTROL, Variant.CANDIDATE)
+            )
+        ),
+        scenario_input_digests={item: "a" * 64 for item in scenario_ids},
+        assertion_contracts=assertion_contracts,
         workspace=str(workspace),
         control_ref="control-sha",
         control_digest="e" * 64,
@@ -371,7 +450,16 @@ async def test_required_ui_gate_can_produce_verified_report(tmp_path: Path) -> N
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "tamper",
-    ["trace", "log", "behavior", "command_contract", "stdout_hash", "cycle"],
+    [
+        "trace",
+        "log",
+        "behavior",
+        "scenario_input",
+        "command_contract",
+        "assertion_contract",
+        "stdout_hash",
+        "cycle",
+    ],
 )
 async def test_verified_report_recomputes_raw_evidence(
     tmp_path: Path, tamper: str
@@ -400,8 +488,14 @@ async def test_verified_report_recomputes_raw_evidence(
                 gate["evidence_ids"] = ["new-log-error"]
     elif tamper == "behavior":
         payload["behavior_evidence"]["observations"][1]["payload"]["total"] = 1
+    elif tamper == "scenario_input":
+        payload["scenario_input_digests"]["checkout:case"] = "0" * 64
     elif tamper == "command_contract":
         payload["command_evidence"][0]["command_spec_digest"] = "f" * 64
+    elif tamper == "assertion_contract":
+        payload["assertion_contracts"][0]["regression_assertions"] = [
+            "missing-step"
+        ]
     elif tamper == "stdout_hash":
         payload["command_evidence"][0]["stdout_sha256"] = "f" * 64
     else:
@@ -422,6 +516,18 @@ async def test_candidate_digest_is_frozen_before_verification(tmp_path: Path) ->
 
     assert report.verdict is VerificationVerdict.BLOCKED
     assert all(item.status is GateStatus.BLOCKED for item in report.gate_results)
+
+
+@pytest.mark.asyncio
+async def test_engine_rejects_scenario_inputs_not_frozen_by_plan(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    engine = _engine(tmp_path)
+    request = _request(workspace, engine).model_copy(
+        update={"scenario_input_digests": {"checkout:other": "a" * 64}}
+    )
+
+    with pytest.raises(ValidationError, match="assertion_contracts"):
+        await engine.verify(request)
 
 
 @pytest.mark.asyncio
@@ -559,6 +665,15 @@ def test_policy_cannot_relax_article_attempt_or_token_caps() -> None:
     with pytest.raises(ValidationError):
         VerificationRunRequest(
             cycle=4,
+            incident_id="incident-1",
+            incident_digest="8" * 64,
+            plan_digest="9" * 64,
+            scenario_input_digests={"checkout:case": "a" * 64},
+            assertion_contracts=(
+                ScenarioAssertionContract(
+                    scenario_id="checkout:case", skill_name="checkout"
+                ),
+            ),
             workspace=".",
             control_ref="control",
             control_digest="a" * 64,
@@ -631,6 +746,39 @@ async def test_skill_and_global_ui_scenario_id_collision_is_blocked(
     skill_digest = loader.load("global").digest
     request = VerificationRunRequest(
         run_id="ui-collision",
+        incident_id="incident-1",
+        incident_digest="8" * 64,
+        plan_digest="9" * 64,
+        replay_digest="7" * 64,
+        replay_manifest=ReplayEvidenceManifest(
+            windows=tuple(
+                ReplayWindowBinding(
+                    scenario_id=scenario_id,
+                    variant=variant,
+                    input_digest="a" * 64,
+                    collection_id=f"ui-collision-{scenario_id}-{variant.value}",
+                    otlp_barrier_digest="4" * 64,
+                    oracle_digest="5" * 64,
+                    result_sha256="6" * 64,
+                )
+                for scenario_id in ("global:case", "checkout:case")
+                for variant in (Variant.CONTROL, Variant.CANDIDATE)
+            )
+        ),
+        scenario_input_digests={
+            "global:case": "a" * 64,
+            "checkout:case": "a" * 64,
+        },
+        assertion_contracts=(
+            ScenarioAssertionContract(
+                scenario_id="global:case",
+                skill_name="global",
+                regression_assertions=("integration",),
+                boundary_assertions=("integration",),
+                side_effect_assertions=("integration",),
+            ),
+            ScenarioAssertionContract(scenario_id="checkout:case"),
+        ),
         workspace=str(workspace),
         control_ref="control-sha",
         control_digest="e" * 64,
@@ -729,11 +877,35 @@ async def test_attested_store_binds_report_to_application_and_detects_tampering(
         signing_key=key,
         app_id="ccb",
         repository="acme/ccb",
+        incident_id=report.incident_id,
+        incident_digest=report.incident_digest,
+        plan_digest=report.plan_digest,
+        replay_digest=report.replay_digest or "",
+        replay_manifest=report.replay_manifest,
+        scenario_input_digests=report.scenario_input_digests,
         policy_digest=report.policy_digest,
         skill_digests=report.skill_digests,
     )
     assert restored == report
     assert Path(path) == location / "report.json"
+
+    with pytest.raises(ValueError, match="plan_digest"):
+        AttestedJsonEvidenceStore.load_attested(
+            root,
+            run_id=report.run_id,
+            cycle=report.cycle,
+            signing_key=key,
+            app_id="ccb",
+            repository="acme/ccb",
+            incident_id=report.incident_id,
+            incident_digest=report.incident_digest,
+            plan_digest="0" * 64,
+            replay_digest=report.replay_digest or "",
+            replay_manifest=report.replay_manifest,
+            scenario_input_digests=report.scenario_input_digests,
+            policy_digest=report.policy_digest,
+            skill_digests=report.skill_digests,
+        )
 
     report_path = location / "report.json"
     report_path.write_bytes(report_path.read_bytes() + b" ")
@@ -745,6 +917,12 @@ async def test_attested_store_binds_report_to_application_and_detects_tampering(
             signing_key=key,
             app_id="ccb",
             repository="acme/ccb",
+            incident_id=report.incident_id,
+            incident_digest=report.incident_digest,
+            plan_digest=report.plan_digest,
+            replay_digest=report.replay_digest or "",
+            replay_manifest=report.replay_manifest,
+            scenario_input_digests=report.scenario_input_digests,
             policy_digest=report.policy_digest,
             skill_digests=report.skill_digests,
         )
@@ -760,6 +938,15 @@ def test_report_rejects_forged_verified_verdict() -> None:
         VerificationReport(
             run_id="safe-run",
             cycle=1,
+            incident_id="incident-1",
+            incident_digest="d" * 64,
+            plan_digest="e" * 64,
+            scenario_input_digests={"checkout:case": "f" * 64},
+            assertion_contracts=(
+                ScenarioAssertionContract(
+                    scenario_id="checkout:case", skill_name="checkout"
+                ),
+            ),
             control_ref="control",
             control_digest="a" * 64,
             candidate_ref="candidate",
@@ -778,6 +965,15 @@ def test_report_and_request_reject_path_traversal_run_id(tmp_path: Path) -> None
     with pytest.raises(ValidationError, match="run_id"):
         VerificationRunRequest(
             run_id="../escape",
+            incident_id="incident-1",
+            incident_digest="e" * 64,
+            plan_digest="f" * 64,
+            scenario_input_digests={"checkout:case": "1" * 64},
+            assertion_contracts=(
+                ScenarioAssertionContract(
+                    scenario_id="checkout:case", skill_name="checkout"
+                ),
+            ),
             workspace=str(tmp_path),
             control_ref="control",
             control_digest="a" * 64,

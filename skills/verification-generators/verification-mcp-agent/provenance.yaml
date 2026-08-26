@@ -1,0 +1,55 @@
+schema_version: "1"
+name: verification-mcp-agent
+upstream:
+  repository: https://github.com/QwenLM/qwen-code.git
+  commit: 5a883243f4f7eca104b7f631dc1ae3dea83abcd5
+  source_path: .qwen/skills/e2e-testing
+  license: Apache-2.0
+vendored:
+  - source_path: LICENSE
+    destination_path: LICENSE.upstream
+    sha256: 6ad909ab730416ad472f9153fa1d3679321012883c1c6d38f803aab402e40a40
+    modifications:
+      - Added a final newline while vendoring; license text is otherwise unchanged.
+  - source_path: .qwen/skills/e2e-testing/SKILL.md
+    destination_path: references/upstream/qwen-e2e-testing/SKILL.md
+    sha256: 35430d4c5d727ddb7b191c80f4953f0e2ee32180982bb6d15582e4fed3b407ff
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: .qwen/skills/e2e-testing/references/mcp-testing.md
+    destination_path: references/upstream/qwen-e2e-testing/references/mcp-testing.md
+    sha256: 3a54c09b15386124618f57dc1f819e6d1c8a02238cb54443d99b57ecd46cf6b1
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: .qwen/skills/e2e-testing/references/mock-openai-server.md
+    destination_path: references/upstream/qwen-e2e-testing/references/mock-openai-server.md
+    sha256: 59c8fcf0dfdaf49cb037d5d170d73e9c8c552b7adec5b47146ef4f60142ab4bd
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: .qwen/skills/e2e-testing/scripts/mcp-test-server.js
+    destination_path: references/upstream/qwen-e2e-testing/scripts/mcp-test-server.js
+    sha256: 811181b3ec7aebf97b0b964aab4005f35130cb0505f8bbc7802b4639d1a0ee9a
+    modifications:
+      - Vendored verbatim as a template; generated copies must satisfy trusted-generation.md.
+  - source_path: .qwen/skills/e2e-testing/scripts/mock-openai-server.js
+    destination_path: references/upstream/qwen-e2e-testing/scripts/mock-openai-server.js
+    sha256: d17d944a8da6c1e2574727f026bbabfdd119873471e407959d7e95f667d0baca
+    modifications:
+      - Vendored verbatim as a template; generated copies must satisfy trusted-generation.md.
+  - source_path: .qwen/skills/e2e-testing/scripts/token-stats.py
+    destination_path: references/upstream/qwen-e2e-testing/scripts/token-stats.py
+    sha256: c4e122d2a7d02426cdc63e4bc14c0b6df0c7cd78481498d0c0e892942039f52d
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: .qwen/skills/e2e-testing/SKILL.md
+    destination_path: SKILL.md
+    sha256: 8a21df5272839392aa284052e9e7d6e11e33963c4d010364303af8f9fba9cc4e
+    modifications:
+      - Reframed as a deterministic MCP-client verification test generator.
+      - Added candidate-external output, independent oracles, lifecycle coverage, and a frozen handoff.
+  - source_path: .qwen/skills/e2e-testing/references/mcp-testing.md
+    destination_path: references/trusted-generation.md
+    sha256: 9678efa7a68fd5e76aa202ff70ebab8ffd0f2eaa154a6672274f0f846a23c9c5
+    modifications:
+      - Added trusted input binding, scripted model/server topology, structured transcript assertions, and fail-closed cleanup.
+      - Restricted control observations to policy-approved unchanged behavior.

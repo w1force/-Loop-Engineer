@@ -17,10 +17,11 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import time
 from typing import Any, Literal
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 _DEBUG_LINE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s+"
     r"\[(?P<level>VERBOSE|DEBUG|INFO|WARN|ERROR)\]\s*(?P<message>.*)$"
@@ -66,6 +67,25 @@ class ExecutionWindow:
     payload: Any = None
     model: str | None = None
     tool_calls: tuple[Mapping[str, Any], ...] | None = None
+    oracle_digest: str | None = None
+    result_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class OtlpFlushBarrier:
+    """Coordinator-authenticated acknowledgement of an exporter force-flush."""
+
+    flush_id: str
+    collection_id: str
+    run_id: str
+    cycle: int
+    scenario_id: str
+    variant: Literal["control", "candidate"]
+    input_digest: str
+    signals: tuple[Literal["traces", "logs"], ...]
+    flush_started_at_ns: int
+    flush_completed_at_ns: int
+    deadline_ns: int
 
 
 def _json(value: Any) -> str:
@@ -196,6 +216,93 @@ class LocalObservabilityStore:
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
+    @staticmethod
+    def _next_ingest_sequence(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT sequence FROM otlp_ingest_clock WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise ObservabilityStoreError("OTLP ingest clock 未初始化")
+        sequence = int(row["sequence"]) + 1
+        connection.execute(
+            "UPDATE otlp_ingest_clock SET sequence = ? WHERE singleton = 1",
+            (sequence,),
+        )
+        return sequence
+
+    @staticmethod
+    def _reject_if_late(
+        connection: sqlite3.Connection,
+        *,
+        resource: Mapping[str, Any],
+        trace_id: str | None,
+    ) -> bool:
+        """Seal verification evidence at the barrier and durably mark late writes."""
+
+        run_id = _nullable(
+            _lookup(resource, "verification.run_id", "verification_run_id")
+        )
+        scenario_id = _nullable(
+            _lookup(resource, "verification.scenario_id", "scenario_id")
+        )
+        cycle = _positive_integer_or_none(
+            _lookup(resource, "verification.cycle", "verification_cycle")
+        )
+        variant = _nullable(_lookup(resource, "verification.variant", "variant"))
+        input_digest = _nullable(
+            _lookup(resource, "verification.input_digest", "input_digest")
+        )
+        collection_id = _nullable(
+            _lookup(
+                resource,
+                "verification.collection_id",
+                "verification_collection_id",
+            )
+        )
+        matches: dict[str, sqlite3.Row] = {}
+        if collection_id:
+            rows = connection.execute(
+                "SELECT * FROM otlp_flush_barriers WHERE collection_id = ?",
+                (collection_id,),
+            ).fetchall()
+            matches.update({row["flush_id"]: row for row in rows})
+        elif all((run_id, cycle, scenario_id, variant, input_digest)):
+            rows = connection.execute(
+                """
+                SELECT * FROM otlp_flush_barriers
+                WHERE run_id = ? AND cycle = ? AND scenario_id = ? AND variant = ?
+                  AND input_digest = ?
+                """,
+                (run_id, cycle, scenario_id, variant, input_digest),
+            ).fetchall()
+            matches.update({row["flush_id"]: row for row in rows})
+        if trace_id:
+            rows = connection.execute(
+                """
+                SELECT barrier.*
+                FROM otlp_flush_barriers AS barrier
+                JOIN execution_windows AS window
+                  ON window.collection_id = barrier.collection_id
+                WHERE window.trace_id = ?
+                """,
+                (trace_id,),
+            ).fetchall()
+            matches.update({row["flush_id"]: row for row in rows})
+        if not matches:
+            return False
+        now_ns = time.time_ns()
+        for flush_id in matches:
+            connection.execute(
+                """
+                UPDATE otlp_flush_barriers
+                SET late_arrival_count = late_arrival_count + 1,
+                    last_late_at_ns = ?
+                WHERE flush_id = ?
+                """,
+                (now_ns, flush_id),
+            )
+        return True
+
     def initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
@@ -218,14 +325,17 @@ class LocalObservabilityStore:
                     service_version TEXT,
                     session_id TEXT,
                     run_id TEXT,
+                    cycle INTEGER,
                     scenario_id TEXT,
                     variant TEXT,
                     input_digest TEXT,
+                    collection_id TEXT,
                     attributes_json TEXT NOT NULL,
                     resource_json TEXT NOT NULL,
                     events_json TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     received_at TEXT NOT NULL,
+                    ingest_sequence INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (trace_id, span_id)
                 );
 
@@ -247,9 +357,11 @@ class LocalObservabilityStore:
                     service_version TEXT,
                     session_id TEXT,
                     run_id TEXT,
+                    cycle INTEGER,
                     scenario_id TEXT,
                     variant TEXT,
                     input_digest TEXT,
+                    collection_id TEXT,
                     event_name TEXT,
                     error_type TEXT,
                     event_code TEXT,
@@ -259,7 +371,8 @@ class LocalObservabilityStore:
                     resource_json TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     source TEXT NOT NULL,
-                    received_at TEXT NOT NULL
+                    received_at TEXT NOT NULL,
+                    ingest_sequence INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE INDEX IF NOT EXISTS log_records_verification_idx
@@ -294,6 +407,8 @@ class LocalObservabilityStore:
                     payload_json TEXT,
                     model TEXT,
                     tool_calls_json TEXT,
+                    oracle_digest TEXT,
+                    result_sha256 TEXT,
                     recorded_at TEXT NOT NULL,
                     PRIMARY KEY (run_id, cycle, scenario_id, variant)
                 );
@@ -304,6 +419,34 @@ class LocalObservabilityStore:
                     byte_offset INTEGER NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS otlp_ingest_clock (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    sequence INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO otlp_ingest_clock(singleton, sequence)
+                VALUES (1, 0);
+
+                CREATE TABLE IF NOT EXISTS otlp_flush_barriers (
+                    flush_id TEXT PRIMARY KEY,
+                    collection_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    cycle INTEGER NOT NULL,
+                    scenario_id TEXT NOT NULL,
+                    variant TEXT NOT NULL CHECK (variant IN ('control', 'candidate')),
+                    input_digest TEXT NOT NULL,
+                    signals_json TEXT NOT NULL,
+                    flush_started_at_ns INTEGER NOT NULL,
+                    flush_completed_at_ns INTEGER NOT NULL,
+                    deadline_ns INTEGER NOT NULL,
+                    received_at_ns INTEGER NOT NULL,
+                    watermark_sequence INTEGER NOT NULL,
+                    timed_out INTEGER NOT NULL CHECK (timed_out IN (0, 1)),
+                    late_arrival_count INTEGER NOT NULL DEFAULT 0,
+                    last_late_at_ns INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS otlp_flush_barriers_collection_idx
+                ON otlp_flush_barriers(collection_id);
                 """
             )
             rows = connection.execute("SELECT version FROM schema_meta").fetchall()
@@ -311,7 +454,7 @@ class LocalObservabilityStore:
                 connection.execute(
                     "INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,)
                 )
-            elif len(rows) == 1 and rows[0]["version"] == 1:
+            elif len(rows) == 1 and rows[0]["version"] in {1, 2, 3, 4}:
                 columns = {
                     row["name"]
                     for row in connection.execute(
@@ -322,16 +465,69 @@ class LocalObservabilityStore:
                     connection.execute(
                         "ALTER TABLE execution_windows ADD COLUMN input_json TEXT"
                     )
+                if "oracle_digest" not in columns:
+                    connection.execute(
+                        "ALTER TABLE execution_windows ADD COLUMN oracle_digest TEXT"
+                    )
+                if "result_sha256" not in columns:
+                    connection.execute(
+                        "ALTER TABLE execution_windows ADD COLUMN result_sha256 TEXT"
+                    )
+                for table in ("trace_spans", "log_records"):
+                    table_columns = {
+                        row["name"]
+                        for row in connection.execute(
+                            f"PRAGMA table_info({table})"
+                        ).fetchall()
+                    }
+                    if "ingest_sequence" not in table_columns:
+                        connection.execute(
+                            f"ALTER TABLE {table} "
+                            "ADD COLUMN ingest_sequence INTEGER NOT NULL DEFAULT 0"
+                        )
+                    if "cycle" not in table_columns:
+                        connection.execute(
+                            f"ALTER TABLE {table} ADD COLUMN cycle INTEGER"
+                        )
+                    if "collection_id" not in table_columns:
+                        connection.execute(
+                            f"ALTER TABLE {table} ADD COLUMN collection_id TEXT"
+                        )
+                barrier_columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(otlp_flush_barriers)"
+                    ).fetchall()
+                }
+                if "late_arrival_count" not in barrier_columns:
+                    connection.execute(
+                        "ALTER TABLE otlp_flush_barriers "
+                        "ADD COLUMN late_arrival_count INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "last_late_at_ns" not in barrier_columns:
+                    connection.execute(
+                        "ALTER TABLE otlp_flush_barriers "
+                        "ADD COLUMN last_late_at_ns INTEGER"
+                    )
                 connection.execute(
                     "UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,)
                 )
             elif len(rows) != 1 or rows[0]["version"] != SCHEMA_VERSION:
                 raise ObservabilityStoreError("不支持的 observability schema 版本")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS trace_spans_collection_idx "
+                "ON trace_spans(collection_id, ingest_sequence)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS log_records_collection_idx "
+                "ON log_records(collection_id, ingest_sequence)"
+            )
 
     def ingest_otlp_traces(self, payload: Mapping[str, Any]) -> int:
         inserted = 0
         received_at = _now()
         with self._connect() as connection:
+            ingest_sequence = self._next_ingest_sequence(connection)
             for resource_group in payload.get("resourceSpans", []):
                 resource = _decode_attributes(
                     (resource_group.get("resource") or {}).get("attributes", [])
@@ -343,6 +539,10 @@ class LocalObservabilityStore:
                         span_id = _normalize_identifier(span.get("spanId"), 8)
                         if not trace_id or not span_id:
                             raise ObservabilityStoreError("OTLP span 缺少 traceId/spanId")
+                        if self._reject_if_late(
+                            connection, resource=resource, trace_id=trace_id
+                        ):
+                            continue
                         status = span.get("status") or {}
                         cursor = connection.execute(
                             """
@@ -350,10 +550,10 @@ class LocalObservabilityStore:
                                 trace_id, span_id, parent_span_id, name,
                                 start_time_ns, end_time_ns, status_code,
                                 status_message, service_name, service_version,
-                                session_id, run_id, scenario_id, variant,
-                                input_digest, attributes_json, resource_json,
-                                events_json, raw_json, received_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                session_id, run_id, cycle, scenario_id, variant,
+                                input_digest, collection_id, attributes_json, resource_json,
+                                events_json, raw_json, received_at, ingest_sequence
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 trace_id,
@@ -368,14 +568,25 @@ class LocalObservabilityStore:
                                 _nullable(_lookup(resource, "service.version")),
                                 _nullable(_lookup(attributes, "session.id") or _lookup(resource, "session.id")),
                                 _nullable(_lookup(resource, "verification.run_id", "verification_run_id")),
+                                _positive_integer_or_none(
+                                    _lookup(resource, "verification.cycle", "verification_cycle")
+                                ),
                                 _nullable(_lookup(resource, "verification.scenario_id", "scenario_id")),
                                 _nullable(_lookup(resource, "verification.variant", "variant")),
                                 _nullable(_lookup(resource, "verification.input_digest", "input_digest")),
+                                _nullable(
+                                    _lookup(
+                                        resource,
+                                        "verification.collection_id",
+                                        "verification_collection_id",
+                                    )
+                                ),
                                 _json(attributes),
                                 _json(resource),
                                 _json(span.get("events", [])),
                                 _json(span),
                                 received_at,
+                                ingest_sequence,
                             ),
                         )
                         inserted += int(cursor.rowcount > 0)
@@ -385,6 +596,7 @@ class LocalObservabilityStore:
         inserted = 0
         received_at = _now()
         with self._connect() as connection:
+            ingest_sequence = self._next_ingest_sequence(connection)
             for resource_group in payload.get("resourceLogs", []):
                 resource = _decode_attributes(
                     (resource_group.get("resource") or {}).get("attributes", [])
@@ -396,6 +608,10 @@ class LocalObservabilityStore:
                         body = body_value if isinstance(body_value, str) else _json(body_value)
                         trace_id = _normalize_identifier(record.get("traceId"), 16) or None
                         span_id = _normalize_identifier(record.get("spanId"), 8) or None
+                        if self._reject_if_late(
+                            connection, resource=resource, trace_id=trace_id
+                        ):
+                            continue
                         timestamp_ns = _integer(record.get("timeUnixNano"))
                         observed_ns = _integer(record.get("observedTimeUnixNano"), timestamp_ns)
                         event_name = _lookup(attributes, "event.name", "event_name")
@@ -430,6 +646,7 @@ class LocalObservabilityStore:
                             raw=record,
                             source="otlp",
                             received_at=received_at,
+                            ingest_sequence=ingest_sequence,
                         )
                         inserted += int(cursor.rowcount > 0)
         return inserted
@@ -451,6 +668,7 @@ class LocalObservabilityStore:
         raw: Any,
         source: str,
         received_at: str,
+        ingest_sequence: int = 0,
     ) -> sqlite3.Cursor:
         event_name = _lookup(attributes, "event.name", "event_name")
         diagnostic_message = str(
@@ -466,11 +684,11 @@ class LocalObservabilityStore:
             INSERT OR IGNORE INTO log_records(
                 observation_id, timestamp_ns, observed_time_ns, trace_id,
                 span_id, severity_number, severity_text, body, service_name,
-                service_version, session_id, run_id, scenario_id, variant,
-                input_digest, event_name, error_type, event_code,
+                service_version, session_id, run_id, cycle, scenario_id, variant,
+                input_digest, collection_id, event_name, error_type, event_code,
                 message_template, business_frame, attributes_json,
-                resource_json, raw_json, source, received_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                resource_json, raw_json, source, received_at, ingest_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 observation_id,
@@ -485,9 +703,19 @@ class LocalObservabilityStore:
                 _nullable(_lookup(resource, "service.version")),
                 _nullable(_lookup(attributes, "session.id") or _lookup(resource, "session.id")),
                 _nullable(_lookup(resource, "verification.run_id", "verification_run_id")),
+                _positive_integer_or_none(
+                    _lookup(resource, "verification.cycle", "verification_cycle")
+                ),
                 _nullable(_lookup(resource, "verification.scenario_id", "scenario_id")),
                 _nullable(_lookup(resource, "verification.variant", "variant")),
                 _nullable(_lookup(resource, "verification.input_digest", "input_digest")),
+                _nullable(
+                    _lookup(
+                        resource,
+                        "verification.collection_id",
+                        "verification_collection_id",
+                    )
+                ),
                 _nullable(event_name),
                 _nullable(error_type),
                 _nullable(_lookup(attributes, "event.code", "event_code")),
@@ -498,6 +726,7 @@ class LocalObservabilityStore:
                 _json(raw),
                 source,
                 received_at,
+                ingest_sequence,
             ),
         )
 
@@ -525,8 +754,10 @@ class LocalObservabilityStore:
             ("control_digest", window.control_digest),
             ("candidate_digest", window.candidate_digest),
             ("policy_digest", window.policy_digest),
+            ("oracle_digest", window.oracle_digest),
+            ("result_sha256", window.result_sha256),
         ):
-            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ObservabilityStoreError(f"{name} 必须是 SHA-256")
         if not window.skill_digests or any(
             not re.fullmatch(r"[0-9a-f]{64}", value)
@@ -547,8 +778,9 @@ class LocalObservabilityStore:
                     candidate_digest, policy_digest, skill_digests_json,
                     started_at_ns, ended_at_ns, collection_complete,
                     trace_id, request_id, session_id, finished, outcome,
-                    payload_json, model, tool_calls_json, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_json, model, tool_calls_json, oracle_digest,
+                    result_sha256, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     window.run_id,
@@ -575,6 +807,8 @@ class LocalObservabilityStore:
                     None if window.payload is None else _json(window.payload),
                     window.model,
                     None if window.tool_calls is None else _json(window.tool_calls),
+                    window.oracle_digest,
+                    window.result_sha256,
                     _now(),
                 ),
             )
@@ -590,12 +824,230 @@ class LocalObservabilityStore:
                 (run_id, cycle),
             ).fetchall()
 
+    def record_otlp_flush_barrier(self, barrier: OtlpFlushBarrier) -> None:
+        """Capture a store-side watermark after a trusted caller force-flushes OTLP."""
+
+        for name in (
+            "cycle",
+            "flush_started_at_ns",
+            "flush_completed_at_ns",
+            "deadline_ns",
+        ):
+            value = getattr(barrier, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ObservabilityStoreError(f"{name} 必须是非负整数")
+        if barrier.cycle < 1:
+            raise ObservabilityStoreError("cycle 必须大于零")
+        for name in ("flush_id", "collection_id", "run_id", "scenario_id"):
+            if not str(getattr(barrier, name)).strip():
+                raise ObservabilityStoreError(f"{name} 不能为空")
+        if barrier.variant not in {"control", "candidate"}:
+            raise ObservabilityStoreError("variant 必须是 control 或 candidate")
+        if not re.fullmatch(r"[0-9a-f]{64}", barrier.input_digest):
+            raise ObservabilityStoreError("input_digest 必须是 SHA-256")
+        if (
+            not barrier.signals
+            or len(barrier.signals) != len(set(barrier.signals))
+            or not set(barrier.signals).issubset({"traces", "logs"})
+        ):
+            raise ObservabilityStoreError("signals 必须是无重复的 traces/logs")
+        if barrier.flush_completed_at_ns < barrier.flush_started_at_ns:
+            raise ObservabilityStoreError("flush 完成时间早于开始时间")
+
+        received_at_ns = time.time_ns()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT sequence FROM otlp_ingest_clock WHERE singleton = 1"
+            ).fetchone()
+            if row is None:
+                raise ObservabilityStoreError("OTLP ingest clock 未初始化")
+            timed_out = (
+                barrier.flush_completed_at_ns > barrier.deadline_ns
+                or received_at_ns > barrier.deadline_ns
+            )
+            connection.execute(
+                """
+                INSERT INTO otlp_flush_barriers(
+                    flush_id, collection_id, run_id, cycle, scenario_id,
+                    variant, input_digest, signals_json, flush_started_at_ns,
+                    flush_completed_at_ns, deadline_ns, received_at_ns,
+                    watermark_sequence, timed_out
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    barrier.flush_id,
+                    barrier.collection_id,
+                    barrier.run_id,
+                    barrier.cycle,
+                    barrier.scenario_id,
+                    barrier.variant,
+                    barrier.input_digest,
+                    _json(sorted(barrier.signals)),
+                    barrier.flush_started_at_ns,
+                    barrier.flush_completed_at_ns,
+                    barrier.deadline_ns,
+                    received_at_ns,
+                    int(row["sequence"]),
+                    int(timed_out),
+                ),
+            )
+
+    def wait_for_otlp_flush_barrier(
+        self,
+        collection_id: str,
+        *,
+        timeout_ms: int,
+        poll_interval_ms: int = 10,
+    ) -> sqlite3.Row:
+        """Wait for one barrier; absence, timeout, or duplicates are hard errors."""
+
+        if isinstance(timeout_ms, bool) or not 1 <= timeout_ms <= 900_000:
+            raise ObservabilityStoreError("timeout_ms 必须在 1..900000")
+        if isinstance(poll_interval_ms, bool) or not 1 <= poll_interval_ms <= 1000:
+            raise ObservabilityStoreError("poll_interval_ms 必须在 1..1000")
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM otlp_flush_barriers WHERE collection_id = ?",
+                    (collection_id,),
+                ).fetchall()
+            if len(rows) > 1:
+                raise ObservabilityStoreError("OTLP flush barrier 不唯一")
+            if len(rows) == 1:
+                if rows[0]["timed_out"]:
+                    raise ObservabilityStoreError("OTLP flush barrier 已超时")
+                return rows[0]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ObservabilityStoreError("等待 OTLP flush barrier 超时")
+            time.sleep(min(poll_interval_ms / 1000, remaining))
+
+    def otlp_barrier_error(self, window: Mapping[str, Any]) -> str | None:
+        """Validate uniqueness, binding, watermark coverage, and late arrivals."""
+
+        with self._connect() as connection:
+            barriers = connection.execute(
+                "SELECT * FROM otlp_flush_barriers WHERE collection_id = ?",
+                (window["collection_id"],),
+            ).fetchall()
+            if not barriers:
+                return "缺少 OTLP flush/watermark barrier"
+            if len(barriers) != 1:
+                return "OTLP flush/watermark barrier 不唯一"
+            barrier = barriers[0]
+            expected = {
+                "collection_id": window["collection_id"],
+                "run_id": window["run_id"],
+                "cycle": window["cycle"],
+                "scenario_id": window["scenario_id"],
+                "variant": window["variant"],
+                "input_digest": window["input_digest"],
+            }
+            mismatches = [
+                name for name, value in expected.items() if barrier[name] != value
+            ]
+            if mismatches:
+                return "OTLP barrier 绑定不一致: " + ", ".join(mismatches)
+            if barrier["timed_out"]:
+                return "OTLP flush/watermark barrier 超时"
+            if int(barrier["late_arrival_count"]):
+                return "OTLP watermark 后检测到晚到数据"
+            try:
+                signals = json.loads(barrier["signals_json"])
+            except (TypeError, json.JSONDecodeError):
+                return "OTLP barrier signals 非法"
+            if signals != ["logs", "traces"]:
+                return "OTLP barrier 未同时确认 traces/logs flush"
+            if (
+                barrier["flush_started_at_ns"] < window["started_at_ns"]
+                or barrier["flush_completed_at_ns"] < barrier["flush_started_at_ns"]
+                or barrier["flush_completed_at_ns"] > barrier["deadline_ns"]
+                or barrier["received_at_ns"] > barrier["deadline_ns"]
+            ):
+                return "OTLP barrier 时间窗口非法或超时"
+
+            watermark = int(barrier["watermark_sequence"])
+            clauses = (
+                "collection_id = ? AND run_id = ? AND cycle = ? "
+                "AND scenario_id = ? AND variant = ? AND input_digest = ?"
+            )
+            params = (
+                window["collection_id"],
+                window["run_id"],
+                window["cycle"],
+                window["scenario_id"],
+                window["variant"],
+                window["input_digest"],
+            )
+            trace_stats = connection.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN ingest_sequence > ? THEN 1 ELSE 0 END) AS late "
+                "FROM trace_spans WHERE " + clauses,
+                (watermark, *params),
+            ).fetchone()
+            log_stats = connection.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN ingest_sequence > ? THEN 1 ELSE 0 END) AS late "
+                "FROM log_records WHERE source = 'otlp' AND " + clauses,
+                (watermark, *params),
+            ).fetchone()
+            if not trace_stats["total"] or not log_stats["total"]:
+                return "OTLP barrier 前 traces/logs 覆盖不完整"
+            if int(trace_stats["late"] or 0) or int(log_stats["late"] or 0):
+                return "OTLP watermark 后检测到晚到数据"
+        return None
+
+    def otlp_barrier_digest(self, window: Mapping[str, Any]) -> str:
+        """Return the digest of the currently valid, immutable barrier snapshot."""
+
+        error = self.otlp_barrier_error(window)
+        if error:
+            raise ObservabilityStoreError(error)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            barriers = connection.execute(
+                "SELECT * FROM otlp_flush_barriers WHERE collection_id = ?",
+                (window["collection_id"],),
+            ).fetchall()
+            if len(barriers) != 1:
+                raise ObservabilityStoreError("OTLP flush/watermark barrier 不唯一")
+            barrier = barriers[0]
+            if barrier["timed_out"] or int(barrier["late_arrival_count"]):
+                raise ObservabilityStoreError("OTLP barrier 已失效")
+            payload = {
+                key: barrier[key]
+                for key in (
+                    "flush_id",
+                    "collection_id",
+                    "run_id",
+                    "cycle",
+                    "scenario_id",
+                    "variant",
+                    "input_digest",
+                    "signals_json",
+                    "flush_started_at_ns",
+                    "flush_completed_at_ns",
+                    "deadline_ns",
+                    "received_at_ns",
+                    "watermark_sequence",
+                    "timed_out",
+                    "late_arrival_count",
+                )
+            }
+        return sha256(_json(payload).encode("utf-8")).hexdigest()
+
     def trace_rows_for_window(self, window: Mapping[str, Any]) -> list[sqlite3.Row]:
         clauses = [
             "start_time_ns <= ?",
             "end_time_ns >= ?",
+            "collection_id = ?",
         ]
-        params: list[Any] = [window["ended_at_ns"], window["started_at_ns"]]
+        params: list[Any] = [
+            window["ended_at_ns"],
+            window["started_at_ns"],
+            window["collection_id"],
+        ]
         if window.get("trace_id"):
             clauses.append("trace_id = ?")
             params.append(window["trace_id"])
@@ -615,7 +1067,11 @@ class LocalObservabilityStore:
 
     def log_rows_for_window(self, window: Mapping[str, Any]) -> list[sqlite3.Row]:
         correlation: list[str] = []
-        params: list[Any] = [window["started_at_ns"], window["ended_at_ns"]]
+        params: list[Any] = [
+            window["started_at_ns"],
+            window["ended_at_ns"],
+            window["collection_id"],
+        ]
         if window.get("trace_id"):
             correlation.append("trace_id = ?")
             params.append(window["trace_id"])
@@ -629,6 +1085,7 @@ class LocalObservabilityStore:
                 """
                 SELECT * FROM log_records
                 WHERE timestamp_ns BETWEEN ? AND ?
+                  AND collection_id = ?
                   AND (""" + " OR ".join(correlation) + ")"
                 " ORDER BY timestamp_ns, observation_id",
                 params,
@@ -714,6 +1171,16 @@ def _nullable(value: Any) -> str | None:
     return text or None
 
 
+def _positive_integer_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _is_false(value: Any) -> bool:
     return value is False or (
         isinstance(value, str) and value.strip().lower() == "false"
@@ -784,8 +1251,12 @@ class CCBDebugLogImporter:
             inserted = 0
             with source.open("rb") as handle:
                 handle.seek(offset)
+                new_offset = offset
                 for raw_line in handle:
                     line_offset = handle.tell() - len(raw_line)
+                    if not raw_line.endswith(b"\n"):
+                        break
+                    new_offset = handle.tell()
                     try:
                         line = raw_line.decode("utf-8").rstrip("\r\n")
                     except UnicodeDecodeError:
@@ -816,7 +1287,6 @@ class CCBDebugLogImporter:
                         received_at=_now(),
                     )
                     inserted += int(cursor.rowcount > 0)
-                new_offset = handle.tell()
             connection.execute(
                 """
                 INSERT INTO import_checkpoints(path, inode, byte_offset, updated_at)
@@ -847,5 +1317,6 @@ __all__ = [
     "ExecutionWindow",
     "LocalObservabilityStore",
     "ObservabilityStoreError",
+    "OtlpFlushBarrier",
     "normalized_input_digest",
 ]

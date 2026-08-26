@@ -15,6 +15,7 @@ from .store import (
     ExecutionWindow,
     LocalObservabilityStore,
     ObservabilityStoreError,
+    OtlpFlushBarrier,
 )
 
 
@@ -103,6 +104,33 @@ class _Handler(BaseHTTPRequestHandler):
                             if payload.get("tool_calls") is not None
                             else None
                         ),
+                    )
+                )
+                self._respond(201, {"recorded": True})
+                return
+            if path == "/api/v1/otlp-flush-barriers":
+                signals = payload["signals"]
+                if not isinstance(signals, list) or any(
+                    not isinstance(item, str) for item in signals
+                ):
+                    raise ValueError("signals must be a string array")
+                self.server.store.record_otlp_flush_barrier(
+                    OtlpFlushBarrier(
+                        flush_id=str(payload["flush_id"]),
+                        collection_id=str(payload["collection_id"]),
+                        run_id=str(payload["run_id"]),
+                        cycle=_strict_int(payload["cycle"]),
+                        scenario_id=str(payload["scenario_id"]),
+                        variant=payload["variant"],
+                        input_digest=str(payload["input_digest"]),
+                        signals=tuple(signals),
+                        flush_started_at_ns=_strict_int(
+                            payload["flush_started_at_ns"]
+                        ),
+                        flush_completed_at_ns=_strict_int(
+                            payload["flush_completed_at_ns"]
+                        ),
+                        deadline_ns=_strict_int(payload["deadline_ns"]),
                     )
                 )
                 self._respond(201, {"recorded": True})

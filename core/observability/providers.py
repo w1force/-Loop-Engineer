@@ -74,11 +74,13 @@ class _SQLiteProviderBase:
             for row in self.store.execution_windows(context.run_id, context.cycle)
         ]
         windows = {(row["scenario_id"], row["variant"]): row for row in rows}
-        required = {
-            (scenario_id, variant)
-            for scenario_id in context.scenario_ids
-            for variant in ("control", "candidate")
+        if len(windows) != len(rows):
+            return windows, "execution window 不唯一"
+        manifest = {
+            (item.scenario_id, item.variant.value): item
+            for item in context.replay_manifest.windows
         }
+        required = set(manifest)
         actual = set(windows)
         if actual != required:
             return windows, (
@@ -86,9 +88,31 @@ class _SQLiteProviderBase:
                 f"extra={sorted(actual - required)}"
             )
         for key, window in windows.items():
+            binding = manifest[key]
+            digest_fields = {
+                "collection_id": binding.collection_id,
+                "input_digest": binding.input_digest,
+                "oracle_digest": binding.oracle_digest,
+                "result_sha256": binding.result_sha256,
+            }
+            mismatches = [
+                name for name, expected in digest_fields.items()
+                if window.get(name) != expected
+            ]
+            if mismatches:
+                return windows, (
+                    f"{key}: execution window 与 replay receipt manifest 不一致: "
+                    + ", ".join(mismatches)
+                )
             error = _validate_window_binding(window, context)
             if error:
                 return windows, f"{key}: {error}"
+            try:
+                barrier_digest = self.store.otlp_barrier_digest(window)
+            except Exception as exc:
+                return windows, f"{key}: {exc}"
+            if barrier_digest != binding.otlp_barrier_digest:
+                return windows, f"{key}: OTLP barrier digest 与 replay receipt 不一致"
         return windows, None
 
     def _trace_rows(
@@ -108,9 +132,11 @@ class _SQLiteProviderBase:
             trace_id = next(iter(trace_ids))
         expected = {
             "run_id": window["run_id"],
+            "cycle": window["cycle"],
             "scenario_id": window["scenario_id"],
             "variant": window["variant"],
             "input_digest": window["input_digest"],
+            "collection_id": window["collection_id"],
         }
         mismatches = {
             key
@@ -168,28 +194,17 @@ def _as_nonnegative_int(value: Any) -> int | None:
     return parsed if parsed >= 0 else None
 
 
-def _explicit_fallback(
-    span_rows: list[sqlite3.Row], log_rows: list[sqlite3.Row]
-) -> bool | None:
-    values: list[bool] = []
-    for row in (*span_rows, *log_rows):
-        attributes = (
-            _span_attributes(row)
-            if "events_json" in row.keys()
-            else json.loads(row["attributes_json"])
-        )
-        for key in (
-            "fallback_used",
-            "fallback.used",
-            "did_fall_back",
-            "didFallBackToNonStreaming",
-        ):
-            parsed = _as_bool(attributes.get(key))
-            if parsed is not None:
-                values.append(parsed)
-    if not values:
-        return None
-    return any(values)
+def _explicit_fallback(attributes: dict[str, Any]) -> bool | None:
+    for key in (
+        "fallback_used",
+        "fallback.used",
+        "did_fall_back",
+        "didFallBackToNonStreaming",
+    ):
+        parsed = _as_bool(attributes.get(key))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _trace_metrics(
@@ -206,15 +221,19 @@ def _trace_metrics(
     api_requests.sort(
         key=lambda item: (item[0]["timestamp_ns"], item[0]["observation_id"])
     )
-    models = [str(attrs["model"]) for _, attrs in api_requests if attrs.get("model")]
-    unique_models = tuple(dict.fromkeys(models))
-    actual_model = (
-        unique_models[0]
-        if len(unique_models) == 1
-        else ("MULTIPLE:" + ",".join(unique_models) if unique_models else None)
-    )
+    models: list[str] = []
     input_tokens: list[int] = []
+    fallback_values: list[bool] = []
+    model_complete = bool(api_requests)
+    tokens_complete = bool(api_requests)
+    fallback_complete = bool(api_requests)
     for _, attributes in api_requests:
+        model = attributes.get("model")
+        if isinstance(model, str) and model.strip():
+            models.append(model)
+        else:
+            model_complete = False
+
         components = [
             _as_nonnegative_int(attributes.get(name))
             for name in (
@@ -225,6 +244,23 @@ def _trace_metrics(
         ]
         if all(item is not None for item in components):
             input_tokens.append(sum(item for item in components if item is not None))
+        else:
+            tokens_complete = False
+
+        fallback = _explicit_fallback(attributes)
+        if fallback is None:
+            fallback_complete = False
+        else:
+            fallback_values.append(fallback)
+
+    unique_models = tuple(dict.fromkeys(models))
+    actual_model = None
+    if model_complete:
+        actual_model = (
+            unique_models[0]
+            if len(unique_models) == 1
+            else "MULTIPLE:" + ",".join(unique_models)
+        )
     sessions = {row["session_id"] for row in rows if row["session_id"]}
     session_id = window.get("session_id")
     if session_id is None and len(sessions) == 1:
@@ -254,8 +290,8 @@ def _trace_metrics(
             )
         ),
         actual_model=actual_model,
-        fallback_used=_explicit_fallback(rows, log_rows),
-        input_tokens=max(input_tokens) if input_tokens else None,
+        fallback_used=any(fallback_values) if fallback_complete else None,
+        input_tokens=max(input_tokens) if tokens_complete else None,
         finished=finished,
     )
 

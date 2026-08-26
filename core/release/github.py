@@ -23,6 +23,8 @@ from core.verification import (
     workspace_digest,
 )
 
+from .barrier import verify_live_replay_barriers
+
 from .models import (
     ApplicationRegistry,
     ApplicationSpec,
@@ -37,11 +39,21 @@ class ReleaseError(RuntimeError):
 
 def _normalize_remote(value: str) -> tuple[str, str]:
     raw = value.strip()
-    ssh = re.fullmatch(r"git@([^:]+):(.+?)(?:\.git)?", raw)
-    if ssh:
-        return ssh.group(1).lower(), ssh.group(2).removesuffix(".git").strip("/")
     parsed = urlparse(raw)
-    if parsed.scheme not in {"http", "https", "ssh"} or not parsed.hostname:
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ReleaseError(f"Git remote URL 端口非法: {value}") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ReleaseError(f"不支持的 Git remote URL: {value}")
     return parsed.hostname.lower(), parsed.path.removesuffix(".git").strip("/")
 
@@ -69,6 +81,7 @@ class _Git:
         env = {key: os.environ[key] for key in inherited if key in os.environ}
         env.update(
             {
+                "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
             }
@@ -340,7 +353,24 @@ class GitHubPullRequestPublisher:
     def __init__(self, token: str, api_url: str = "https://api.github.com"):
         if not token:
             raise ReleaseError("缺少 GitHub token")
-        self.api_url = api_url.rstrip("/")
+        parsed = urlparse(api_url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ReleaseError("GitHub API URL 端口非法") from exc
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").lower() != "api.github.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in {None, 443}
+            or parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ReleaseError("GitHub API URL 必须是 https://api.github.com")
+        self.api_url = "https://api.github.com"
         self.client = httpx.Client(
             headers={
                 "Accept": "application/vnd.github+json",
@@ -348,6 +378,7 @@ class GitHubPullRequestPublisher:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             timeout=30,
+            trust_env=False,
         )
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
@@ -442,6 +473,12 @@ class ReleaseManager:
                 signing_key=signing_key,
                 app_id=app.app_id,
                 repository=app.github_repository,
+                incident_id=request.verification_incident_id,
+                incident_digest=request.verification_incident_digest,
+                plan_digest=request.verification_plan_digest,
+                replay_digest=request.verification_replay_digest,
+                replay_manifest=request.verification_replay_manifest,
+                scenario_input_digests=request.verification_scenario_input_digests,
                 policy_digest=app.verification_policy_digest,
                 skill_digests=app.verification_skill_digests,
             )
@@ -449,9 +486,28 @@ class ReleaseManager:
             raise ReleaseError(f"受信 Verification evidence 校验失败: {exc}") from exc
         if report.verdict is not VerificationVerdict.VERIFIED:
             raise ReleaseError(f"Verification 未放行: {report.verdict.value}")
+        ignored_changed_files = sorted(
+            path
+            for path in request.changed_files
+            if _ignored(path, report.policy.workspace_ignore)
+        )
+        if ignored_changed_files:
+            raise ReleaseError(
+                "发布文件命中 verification workspace_ignore，内容未被验证: "
+                + ", ".join(ignored_changed_files)
+            )
         current_digest = workspace_digest(repository, report.policy.workspace_ignore)
         if current_digest != report.candidate_digest:
             raise ReleaseError("当前服务源码与 VERIFIED candidate digest 不一致")
+        try:
+            verify_live_replay_barriers(
+                app.verification_observability_database,
+                run_id=request.verification_run_id,
+                cycle=request.verification_cycle,
+                manifest=request.verification_replay_manifest,
+            )
+        except ValueError as exc:
+            raise ReleaseError(f"实时 OTLP barrier 复核失败: {exc}") from exc
 
         expected_files = set(request.changed_files)
         git.run("diff", "--check")
@@ -534,6 +590,15 @@ class ReleaseManager:
         else:
             git.push(app.remote_name, branch, github_token)
 
+        try:
+            verify_live_replay_barriers(
+                app.verification_observability_database,
+                run_id=request.verification_run_id,
+                cycle=request.verification_cycle,
+                manifest=request.verification_replay_manifest,
+            )
+        except ValueError as exc:
+            raise ReleaseError(f"创建 PR 前 OTLP barrier 复核失败: {exc}") from exc
         number, url = publisher.create_or_get(
             repository=app.github_repository,
             branch=branch,

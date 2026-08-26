@@ -36,7 +36,9 @@ from core.verification.gates import (
     evaluate_behavior_gate,
     evaluate_command_gate,
     evaluate_log_gate,
+    validate_assertion_contracts,
 )
+from core.verification.models import ScenarioAssertionContract
 from core.verification.runner import command_contract_digest
 
 
@@ -340,9 +342,14 @@ def test_command_evidence_rejects_coerced_result_values(
         CommandEvidence.model_validate(payload)
 
 
-def _evaluate_behavior(evidence: BehaviorEvidence) -> GateResult:
+def _evaluate_behavior(
+    evidence: BehaviorEvidence,
+    *,
+    spec: BehaviorGateSpec | None = None,
+    assertion_contracts: tuple[ScenarioAssertionContract, ...] = (),
+) -> GateResult:
     return evaluate_behavior_gate(
-        _behavior_spec(),
+        spec or _behavior_spec(),
         evidence,
         run_id=RUN_ID,
         cycle=1,
@@ -355,7 +362,58 @@ def _evaluate_behavior(evidence: BehaviorEvidence) -> GateResult:
         candidate_traces={
             "trace-candidate": _trace_evidence().observations[0],
         },
+        scenario_input_digests={SCENARIO_ID: "e" * 64},
+        assertion_contracts=assertion_contracts,
     )
+
+
+def test_assertions_require_one_passing_scenario_command_evidence() -> None:
+    spec = CommandSpec(id="focused", argv=("python", "-m", "pytest"))
+    evidence = _command_evidence(
+        evidence_id="focused-evidence",
+        gate=GateKind.INTEGRATION,
+        spec=spec,
+        skill_name="checkout",
+        scenario_id=SCENARIO_ID,
+    )
+    contract = ScenarioAssertionContract(
+        scenario_id=SCENARIO_ID,
+        skill_name="checkout",
+        regression_assertions=("focused",),
+        boundary_assertions=("focused",),
+        side_effect_assertions=("focused",),
+    )
+
+    assert validate_assertion_contracts((contract,), (evidence,)) == ()
+    assert validate_assertion_contracts((contract,), ())
+    assert validate_assertion_contracts(
+        (contract,), (evidence.model_copy(update={"passed": False}),)
+    )
+
+
+def test_forbidden_changed_path_tightens_behavior_gate() -> None:
+    spec = BehaviorGateSpec(
+        scenarios=(
+            _behavior_spec().scenarios[0].model_copy(
+                update={
+                    "allowed_changed_paths": ("$.statu*",),
+                    "forbidden_changed_paths": ("$.status",),
+                }
+            ),
+        )
+    )
+    contract = ScenarioAssertionContract(
+        scenario_id=SCENARIO_ID,
+        skill_name="checkout",
+        forbidden_changed_paths=("$.status",),
+    )
+
+    result = _evaluate_behavior(
+        _behavior_evidence(), spec=spec, assertion_contracts=(contract,)
+    )
+
+    assert result.status is GateStatus.FAIL
+    assert "禁止行为变化" in result.failures[0]
 
 
 def test_command_gate_rejects_substituted_argv_contract() -> None:
@@ -481,6 +539,18 @@ def test_policy_requires_successful_candidate_behavior() -> None:
         )
 
 
+def test_reproducer_must_explicitly_fail_on_control() -> None:
+    with pytest.raises(ValidationError, match="control=failure"):
+        BehaviorScenarioSpec(
+            scenario_id=SCENARIO_ID,
+            expected_control_outcome="success",
+            expected_candidate_outcome="success",
+            allowed_changed_paths=("$.status",),
+            required_changed_paths=("$.status",),
+            reproducer=True,
+        )
+
+
 def test_behavior_outcome_change_requires_explicit_reproducer() -> None:
     with pytest.raises(ValidationError, match="reproducer"):
         BehaviorScenarioSpec(
@@ -545,6 +615,15 @@ def test_report_cycle_is_limited_to_article_attempts(cycle: int) -> None:
         VerificationReport(
             run_id=RUN_ID,
             cycle=cycle,
+            incident_id="incident-1",
+            incident_digest="1" * 64,
+            plan_digest="2" * 64,
+            scenario_input_digests={SCENARIO_ID: "e" * 64},
+            assertion_contracts=(
+                ScenarioAssertionContract(
+                    scenario_id=SCENARIO_ID, skill_name="checkout"
+                ),
+            ),
             control_ref=CONTROL_REF,
             control_digest=CONTROL_DIGEST,
             candidate_ref=CANDIDATE_REF,

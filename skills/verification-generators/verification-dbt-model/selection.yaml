@@ -1,0 +1,48 @@
+name: verification-dbt-model
+scenarios:
+  - id: dbt-sql-model-logic
+    when:
+      matched_rules:
+        - data-transformation-regression
+        - dbt-model-regression
+        - incorrect-query-result
+      changed_paths:
+        - "models/**/*.sql"
+        - "models/**/*.yml"
+        - "models/**/*.yaml"
+      risk_tags:
+        - dbt
+        - sql-model
+        - data-correctness
+    selection_prompt: |
+      Select this scenario when a current-project dbt SQL model changes business
+      transformation logic. Generate a diff-derived boundary matrix, static mocked
+      inputs, independently derived expected rows, and companion schema/type checks
+      in an isolated temporary warehouse target.
+    exclusions:
+      - Python models, snapshots, seeds, analyses, or package-owned models
+      - Recursive SQL or materialized-view models unsupported by dbt unit tests
+      - A request that only validates source freshness or warehouse infrastructure
+      - Any execution target that is not proven disposable
+  - id: dbt-incremental-model
+    when:
+      matched_rules:
+        - incremental-model-regression
+        - watermark-regression
+      changed_paths:
+        - "models/**/*.sql"
+        - "macros/**/*.sql"
+      risk_tags:
+        - dbt
+        - incremental
+        - merge-boundary
+    selection_prompt: |
+      Select this scenario when changed incremental selection or merge logic can
+      alter emitted rows. Generate separate full-refresh and incremental cases,
+      fixture `this`, and cover values immediately below, equal to, and above the
+      watermark. The oracle describes rows to merge, not the final table state.
+    exclusions:
+      - Verification of adapter merge implementation rather than model SQL output
+      - Existing shared schemas that could be emptied or overwritten
+      - Incremental behavior whose required macro or environment value cannot be frozen
+

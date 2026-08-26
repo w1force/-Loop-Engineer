@@ -7,8 +7,11 @@ import json
 from pathlib import Path
 import re
 from typing import Literal, Self
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from core.verification.models import ReplayEvidenceManifest
 
 
 _APP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -30,6 +33,7 @@ class ApplicationSpec(ReleaseModel):
     reviewers: tuple[str, ...] = Field(min_length=1)
     github_api_url: str = "https://api.github.com"
     verification_evidence_root: str = Field(min_length=1)
+    verification_observability_database: str = Field(min_length=1)
     verification_policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     verification_skill_digests: dict[str, str] = Field(min_length=1)
     verification_signing_key_env: str = "LOOP_ENGINEER_VERIFICATION_SIGNING_KEY"
@@ -56,9 +60,47 @@ class ApplicationSpec(ReleaseModel):
         return value
 
     @model_validator(mode="after")
-    def _unique_reviewers(self) -> Self:
+    def _validate_application_contract(self) -> Self:
         if len(self.reviewers) != len(set(self.reviewers)):
             raise ValueError("reviewers 不能重复")
+        remote = urlparse(self.remote_url)
+        try:
+            remote_port = remote.port
+        except ValueError as exc:
+            raise ValueError("remote_url 端口非法") from exc
+        remote_repository = remote.path.removesuffix(".git").strip("/")
+        if (
+            remote.scheme != "https"
+            or (remote.hostname or "").lower() != "github.com"
+            or remote.username is not None
+            or remote.password is not None
+            or remote_port not in {None, 443}
+            or remote.params
+            or remote.query
+            or remote.fragment
+            or remote_repository != self.github_repository
+        ):
+            raise ValueError(
+                "remote_url 必须是与 github_repository 一致的 HTTPS GitHub 地址"
+            )
+
+        api = urlparse(self.github_api_url)
+        try:
+            api_port = api.port
+        except ValueError as exc:
+            raise ValueError("github_api_url 端口非法") from exc
+        if (
+            api.scheme != "https"
+            or (api.hostname or "").lower() != "api.github.com"
+            or api.username is not None
+            or api.password is not None
+            or api_port not in {None, 443}
+            or api.path not in {"", "/"}
+            or api.params
+            or api.query
+            or api.fragment
+        ):
+            raise ValueError("github_api_url 必须是 https://api.github.com")
         return self
 
     @field_validator("verification_skill_digests")
@@ -122,6 +164,12 @@ class ReleaseRequest(ReleaseModel):
     repository_path: str = Field(min_length=1)
     verification_run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     verification_cycle: int = Field(ge=1, le=3)
+    verification_incident_id: str = Field(min_length=1)
+    verification_incident_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verification_plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verification_replay_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verification_replay_manifest: ReplayEvidenceManifest
+    verification_scenario_input_digests: dict[str, str] = Field(min_length=1)
     problem_slug: str
     branch_date: date = Field(default_factory=date.today)
     sequence: int = Field(default=1, ge=1, le=999)
@@ -143,6 +191,17 @@ class ReleaseRequest(ReleaseModel):
     def _valid_slug(cls, value: str) -> str:
         if not _SLUG.fullmatch(value):
             raise ValueError("problem_slug 必须是小写 kebab-case")
+        return value
+
+    @field_validator("verification_scenario_input_digests")
+    @classmethod
+    def _valid_scenario_input_digests(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(
+            not scenario_id
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            for scenario_id, digest in value.items()
+        ):
+            raise ValueError("verification_scenario_input_digests 非法")
         return value
 
     @field_validator("changed_files")

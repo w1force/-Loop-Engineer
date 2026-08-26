@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from ..file_state import expand_path
 from ..tools import ToolContext, build_tool
 from .ripgrep import rip_grep
 
@@ -48,7 +49,11 @@ class GlobInput(BaseModel):
 
 
 async def _glob_func(inp: GlobInput, ctx: ToolContext) -> str:
-    res = await glob(inp.pattern, inp.path or ctx.agent_state.cwd)
+    search_root = expand_path(
+        inp.path or ctx.agent_state.cwd,
+        cwd=ctx.agent_state.cwd,
+    )
+    res = await glob(inp.pattern, search_root)
     if not res["files"]:
         return "No files found"
     lines = list(res["files"])

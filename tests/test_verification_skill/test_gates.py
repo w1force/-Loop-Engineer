@@ -71,6 +71,7 @@ def _trace_result(evidence: TraceEvidence) -> GateResult:
         policy_digest=POLICY_DIGEST,
         expected_skill_digests=SKILL_DIGESTS,
         scenario_ids={"checkout:submit"},
+        scenario_input_digests={"checkout:submit": "d" * 64},
     )
 
 
@@ -94,6 +95,24 @@ def test_trace_article_threshold_is_strict() -> None:
     result = _trace_result(at_limit)
     assert result.status is GateStatus.FAIL
     assert "must be < 150000" in result.failures[0]
+
+
+def test_trace_must_match_frozen_plan_input_digest() -> None:
+    result = evaluate_trace_gate(
+        TraceGateSpec(expected_model="model-a"),
+        _trace(),
+        run_id="run-1",
+        cycle=1,
+        candidate_ref="candidate",
+        candidate_digest=DIGEST,
+        policy_digest=POLICY_DIGEST,
+        expected_skill_digests=SKILL_DIGESTS,
+        scenario_ids={"checkout:submit"},
+        scenario_input_digests={"checkout:submit": "0" * 64},
+    )
+
+    assert result.status is GateStatus.BLOCKED
+    assert "Plan" in result.summary
 
 
 @pytest.mark.parametrize(
@@ -178,6 +197,20 @@ def test_log_gate_rejects_only_new_candidate_error_types() -> None:
         scenario_ids={"s"},
         scenario_input_digests={"s": "d" * 64},
     ).status is GateStatus.PASS
+    assert evaluate_log_gate(
+        LogGateSpec(),
+        known,
+        run_id="run-1",
+        cycle=1,
+        control_ref="control",
+        control_digest=CONTROL_DIGEST,
+        candidate_ref="candidate",
+        candidate_digest=DIGEST,
+        policy_digest=POLICY_DIGEST,
+        expected_skill_digests=SKILL_DIGESTS,
+        scenario_ids={"s"},
+        scenario_input_digests={"s": "0" * 64},
+    ).status is GateStatus.BLOCKED
 
     added = known.model_copy(
         update={
@@ -378,8 +411,35 @@ def test_behavior_pairs_by_run_and_scenario_not_request_or_trace_id() -> None:
                 finished=True,
             )
         },
+        scenario_input_digests={"checkout:submit": "e" * 64},
     )
     assert result.status is GateStatus.PASS
+    assert evaluate_behavior_gate(
+        spec,
+        evidence,
+        run_id="run-1",
+        cycle=1,
+        control_ref="control",
+        control_digest=CONTROL_DIGEST,
+        candidate_ref="candidate",
+        candidate_digest=DIGEST,
+        policy_digest=POLICY_DIGEST,
+        expected_skill_digests=SKILL_DIGESTS,
+        candidate_traces={
+            "trace-new": TraceObservation(
+                trace_id="trace-new",
+                request_id="request-new",
+                scenario_id="checkout:submit",
+                input_digest="e" * 64,
+                error_observations=0,
+                actual_model="model-a",
+                fallback_used=False,
+                input_tokens=1,
+                finished=True,
+            )
+        },
+        scenario_input_digests={"checkout:submit": "0" * 64},
+    ).status is GateStatus.BLOCKED
 
     changed_total = evidence.model_copy(
         update={
@@ -415,6 +475,7 @@ def test_behavior_pairs_by_run_and_scenario_not_request_or_trace_id() -> None:
                 finished=True,
             )
         },
+        scenario_input_digests={"checkout:submit": "e" * 64},
     ).status is GateStatus.FAIL
 
 
@@ -484,6 +545,7 @@ def test_behavior_requires_declared_reproducer_and_trace_shape() -> None:
         policy_digest=POLICY_DIGEST,
         expected_skill_digests=SKILL_DIGESTS,
         candidate_traces={},
+        scenario_input_digests={"fix": "e" * 64},
     ).status is GateStatus.BLOCKED
 
 

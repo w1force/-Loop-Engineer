@@ -20,9 +20,18 @@ class FileState:
 
 
 # ── 低层文件工具(读写 + mtime,供 Read/Edit/Write 共用)──────────────
-def expand_path(path: str) -> str:
-    """展开 ~ 并转绝对路径。os 操作用它;传给缓存的 key 会再被 _norm 归一化。"""
-    return os.path.abspath(os.path.expanduser(path))
+def expand_path(path: str, *, cwd: str | None = None) -> str:
+    """展开 ``~`` 并按 Agent 工作目录解析相对路径。
+
+    工具子 Agent 可以拥有不同于宿主进程的 ``AgentState.cwd``。若仍按进程 cwd
+    解析，fresh Repair Agent 会误读或误写主工作区。低层直接调用未传 ``cwd`` 时
+    保留原有行为。
+    """
+
+    expanded = os.path.expanduser(path)
+    if cwd is not None and not os.path.isabs(expanded):
+        expanded = os.path.join(cwd, expanded)
+    return os.path.abspath(expanded)
 
 
 def file_mtime_ms(path: str) -> int:

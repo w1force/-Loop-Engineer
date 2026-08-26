@@ -1,6 +1,30 @@
 {
   "run_id": "CONFIGURE_RUN_ID",
   "cycle": 1,
+  "incident_id": "CONFIGURE_INCIDENT_ID",
+  "incident_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "plan_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "replay_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "replay_manifest": {
+    "schema_version": "verification-replay-evidence-manifest/v1",
+    "windows": [
+      {"scenario_id":"ccb-regression:incident-reproducer","variant":"control","input_digest":"a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f","collection_id":"CONFIGURE_CONTROL_COLLECTION_ID","otlp_barrier_digest":"0000000000000000000000000000000000000000000000000000000000000000","oracle_digest":"33439f49b86d29ac4ba0162364697d2c95d93de410a065219dc726791ae9af9c","result_sha256":"0000000000000000000000000000000000000000000000000000000000000000"},
+      {"scenario_id":"ccb-regression:incident-reproducer","variant":"candidate","input_digest":"a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f","collection_id":"CONFIGURE_CANDIDATE_COLLECTION_ID","otlp_barrier_digest":"0000000000000000000000000000000000000000000000000000000000000000","oracle_digest":"33439f49b86d29ac4ba0162364697d2c95d93de410a065219dc726791ae9af9c","result_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
+    ]
+  },
+  "scenario_input_digests": {
+    "ccb-regression:incident-reproducer": "a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f"
+  },
+  "assertion_contracts": [
+    {
+      "scenario_id": "ccb-regression:incident-reproducer",
+      "skill_name": "ccb-regression",
+      "forbidden_changed_paths": ["@model", "@tool_calls", "@finished"],
+      "regression_assertions": ["focused-test"],
+      "boundary_assertions": ["boundary-test"],
+      "side_effect_assertions": ["side-effect-test"]
+    }
+  ],
   "workspace": "/Users/wangzheng.440/claude-code",
   "control_ref": "CONFIGURE_CONTROL_COMMIT_SHA",
   "control_digest": "0000000000000000000000000000000000000000000000000000000000000000",

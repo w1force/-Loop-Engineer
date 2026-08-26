@@ -1,6 +1,7 @@
 """Verified GitHub pull-request release gate."""
 
 from .github import GitHubPullRequestPublisher, ReleaseError, ReleaseManager
+from .coordinator import CoordinatorReleaseAction
 from .models import (
     ApplicationRegistry,
     ApplicationSpec,
@@ -11,6 +12,7 @@ from .models import (
 __all__ = [
     "ApplicationRegistry",
     "ApplicationSpec",
+    "CoordinatorReleaseAction",
     "GitHubPullRequestPublisher",
     "PullRequestReceipt",
     "ReleaseError",

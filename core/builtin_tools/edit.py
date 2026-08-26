@@ -52,7 +52,7 @@ def _check_optimistic_lock(ctx: ToolContext, path: str, current: str) -> None:
 
 
 async def _edit_func(inp: EditInput, ctx: ToolContext) -> str:
-    path = expand_path(inp.file_path)
+    path = expand_path(inp.file_path, cwd=ctx.agent_state.cwd)
     old, new = inp.old_string, inp.new_string
 
     if old == new:

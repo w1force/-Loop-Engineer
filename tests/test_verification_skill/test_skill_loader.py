@@ -10,6 +10,7 @@ from core.verification import (
     VerificationSkillError,
     VerificationSkillLoader,
 )
+from core.verification.models import ScenarioAssertionContract
 from core.skills import SkillLoader as AgentSkillLoader
 
 
@@ -50,6 +51,15 @@ def test_verification_sop_is_discoverable_by_agent_skill_loader() -> None:
 
 def test_run_request_requires_non_empty_unique_skill_names(tmp_path: Path) -> None:
     common = {
+        "incident_id": "incident-1",
+        "incident_digest": "e" * 64,
+        "plan_digest": "f" * 64,
+        "scenario_input_digests": {"checkout:submit-order": "1" * 64},
+        "assertion_contracts": (
+            ScenarioAssertionContract(
+                scenario_id="checkout:submit-order", skill_name="checkout"
+            ),
+        ),
         "workspace": str(tmp_path),
         "control_ref": "control",
         "control_digest": "a" * 64,

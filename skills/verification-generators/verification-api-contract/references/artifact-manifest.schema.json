@@ -1,0 +1,404 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loop-engineer.local/schemas/verification-api-contract-artifact-manifest-v1.json",
+  "title": "Verification API contract generated artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "skill_name",
+    "generation_id",
+    "status",
+    "inputs",
+    "artifacts",
+    "dependencies",
+    "category_obligations",
+    "response_obligations",
+    "cases",
+    "gaps"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "skill_name": { "const": "verification-api-contract" },
+    "generation_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["READY", "BLOCKED"] },
+    "inputs": { "$ref": "#/$defs/inputs" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "dependencies": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/dependency" }
+    },
+    "category_obligations": {
+      "type": "array",
+      "minItems": 4,
+      "items": { "$ref": "#/$defs/categoryObligation" }
+    },
+    "response_obligations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/responseObligation" }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/case" }
+    },
+    "gaps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gap" }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "cycle",
+        "incident_id",
+        "incident_digest",
+        "failure_signature_digest",
+        "candidate_diff_digest",
+        "control_snapshot_digest",
+        "candidate_snapshot_digest",
+        "policy_digest",
+        "generator_skill_digest",
+        "spec",
+        "affected_operations",
+        "seed",
+        "frozen_clock",
+        "target_kind"
+      ],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "cycle": { "type": "integer", "minimum": 1 },
+        "incident_id": { "type": "string", "minLength": 1 },
+        "incident_digest": { "$ref": "#/$defs/digest" },
+        "failure_signature_digest": { "$ref": "#/$defs/digest" },
+        "candidate_diff_digest": { "$ref": "#/$defs/digest" },
+        "control_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "candidate_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "policy_digest": { "$ref": "#/$defs/digest" },
+        "generator_skill_digest": { "$ref": "#/$defs/digest" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": { "$ref": "#/$defs/relativePath" },
+            "sha256": { "$ref": "#/$defs/digest" }
+          }
+        },
+        "affected_operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/operationSelector" }
+        },
+        "seed": { "type": "integer", "minimum": 0 },
+        "frozen_clock": { "type": "string", "format": "date-time" },
+        "target_kind": {
+          "enum": ["isolated_container", "ephemeral_local", "prism_mock"]
+        }
+      }
+    },
+    "operationSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": {
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"]
+        },
+        "path": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "role", "media_type", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "role": {
+          "enum": ["test", "fixture", "hook", "runner_config", "oracle"]
+        },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "sha256", "source"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "categoryObligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "disposition", "case_ids"],
+      "properties": {
+        "category": {
+          "enum": ["regression", "boundary", "side_effect", "idempotency"]
+        },
+        "disposition": { "enum": ["generated", "blocked", "not_applicable"] },
+        "case_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "policy_digest": { "$ref": "#/$defs/digest" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "disposition": { "const": "generated" } } },
+          "then": { "properties": { "case_ids": { "minItems": 1 } } }
+        },
+        {
+          "if": {
+            "properties": { "disposition": { "enum": ["blocked", "not_applicable"] } }
+          },
+          "then": { "required": ["reason"] }
+        },
+        {
+          "if": { "properties": { "disposition": { "const": "not_applicable" } } },
+          "then": { "required": ["policy_digest"] }
+        }
+      ]
+    },
+    "responseObligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path", "response_key", "disposition", "case_ids"],
+      "properties": {
+        "method": {
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"]
+        },
+        "path": { "type": "string", "pattern": "^/" },
+        "response_key": {
+          "type": "string",
+          "pattern": "^(?:[1-5][0-9]{2}|[1-5][xX]{2}|default)$"
+        },
+        "disposition": { "enum": ["generated", "blocked", "not_applicable"] },
+        "case_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "policy_digest": { "$ref": "#/$defs/digest" },
+        "concrete_status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "disposition": { "const": "generated" } } },
+          "then": { "properties": { "case_ids": { "minItems": 1 } } }
+        },
+        {
+          "if": {
+            "properties": { "disposition": { "enum": ["blocked", "not_applicable"] } }
+          },
+          "then": { "required": ["reason"] }
+        },
+        {
+          "if": { "properties": { "disposition": { "const": "not_applicable" } } },
+          "then": { "required": ["policy_digest"] }
+        },
+        {
+          "if": { "properties": { "response_key": { "pattern": "[xX]|default" } } },
+          "then": {
+            "if": { "properties": { "disposition": { "const": "generated" } } },
+            "then": { "required": ["concrete_status"] }
+          }
+        }
+      ]
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "concerns",
+        "operation",
+        "mutates_state",
+        "artifact_refs",
+        "fixture_refs",
+        "oracles",
+        "command",
+        "determinism",
+        "isolation",
+        "cleanup",
+        "expected_relation"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "category": {
+          "enum": ["regression", "boundary", "side_effect", "idempotency"]
+        },
+        "concerns": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "operation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "path", "operation_id", "spec_response_key"],
+          "properties": {
+            "method": {
+              "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"]
+            },
+            "path": { "type": "string", "pattern": "^/" },
+            "operation_id": { "type": ["string", "null"] },
+            "spec_response_key": {
+              "type": "string",
+              "pattern": "^(?:[1-5][0-9]{2}|[1-5][xX]{2}|default)$"
+            }
+          }
+        },
+        "mutates_state": { "type": "boolean" },
+        "artifact_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relativePath" }
+        },
+        "fixture_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relativePath" }
+        },
+        "oracles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/oracle" }
+        },
+        "command": { "$ref": "#/$defs/command" },
+        "determinism": { "$ref": "#/$defs/determinism" },
+        "isolation": { "$ref": "#/$defs/isolation" },
+        "cleanup": { "$ref": "#/$defs/cleanup" },
+        "expected_relation": {
+          "enum": ["control_fail_candidate_pass", "both_pass", "candidate_pass"]
+        }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_ref", "source_digest", "assertions"],
+      "properties": {
+        "kind": {
+          "enum": ["openapi", "incident", "policy", "fixture", "control_baseline"]
+        },
+        "source_ref": { "type": "string", "minLength": 1 },
+        "source_digest": { "$ref": "#/$defs/digest" },
+        "assertions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "timeout_seconds", "env_names"],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "env_names": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+        }
+      }
+    },
+    "determinism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed", "frozen_clock", "generated_ids", "retry_count"],
+      "properties": {
+        "seed": { "type": "integer", "minimum": 0 },
+        "frozen_clock": { "type": "string", "format": "date-time" },
+        "generated_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "retry_count": { "const": 0 }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_kind", "namespace", "network", "production_allowed"],
+      "properties": {
+        "target_kind": {
+          "enum": ["isolated_container", "ephemeral_local", "prism_mock"]
+        },
+        "namespace": { "type": "string", "minLength": 1 },
+        "network": { "enum": ["none", "loopback", "frozen_allowlist"] },
+        "production_allowed": { "const": false }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["always_run", "argv", "artifact_refs", "postconditions"],
+      "properties": {
+        "always_run": { "type": "boolean" },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "artifact_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relativePath" }
+        },
+        "postconditions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obligation_id", "reason", "blocking"],
+      "properties": {
+        "obligation_id": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "blocking": { "const": true }
+      }
+    }
+  }
+}

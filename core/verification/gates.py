@@ -9,15 +9,19 @@ from .models import (
     BehaviorEvidence,
     BehaviorGateSpec,
     CommandEvidence,
+    FrozenVerificationSkill,
     GateKind,
     GateResult,
     GateStatus,
     LogEvidence,
     LogGateSpec,
+    ResolvedVerificationSkill,
+    ScenarioAssertionContract,
     TraceEvidence,
     TraceGateSpec,
     TraceObservation,
     Variant,
+    VerificationPolicy,
     VerificationVerdict,
 )
 
@@ -134,6 +138,149 @@ def evaluate_command_gate(
     )
 
 
+def validate_assertion_contracts(
+    contracts: Iterable[ScenarioAssertionContract],
+    evidence: Iterable[CommandEvidence],
+) -> tuple[str, ...]:
+    """Require every frozen scenario assertion to resolve to one passing command."""
+
+    command_items = tuple(
+        item
+        for item in evidence
+        if item.gate in {GateKind.INTEGRATION, GateKind.UI}
+    )
+    by_key: dict[tuple[str | None, str | None, str], list[CommandEvidence]] = {}
+    for item in command_items:
+        key = (item.skill_name, item.scenario_id, item.check_id)
+        by_key.setdefault(key, []).append(item)
+
+    failures: list[str] = []
+    assertion_fields = (
+        ("回归", "regression_assertions"),
+        ("边界", "boundary_assertions"),
+        ("副作用", "side_effect_assertions"),
+    )
+    for contract in contracts:
+        for label, field_name in assertion_fields:
+            for check_id in getattr(contract, field_name):
+                key = (contract.skill_name, contract.scenario_id, check_id)
+                matches = by_key.get(key, [])
+                if len(matches) != 1:
+                    failures.append(
+                        f"{contract.scenario_id}: {label}断言 {check_id} "
+                        f"需要且只能绑定一份命令证据，实际 {len(matches)} 份"
+                    )
+                    continue
+                item = matches[0]
+                if item.variant is not Variant.CANDIDATE or not item.passed:
+                    failures.append(
+                        f"{contract.scenario_id}: {label}断言 {check_id} 未通过"
+                    )
+    return tuple(failures)
+
+
+def validate_assertion_contract_definitions(
+    contracts: tuple[ScenarioAssertionContract, ...],
+    *,
+    skills: Iterable[FrozenVerificationSkill | ResolvedVerificationSkill],
+    policy: VerificationPolicy,
+) -> tuple[str, ...]:
+    """Validate that frozen assertions are complete and match trusted contracts."""
+
+    command_scenarios = {
+        (skill.name, f"{skill.name}:{scenario.id}"): scenario
+        for skill in skills
+        for scenario in (*skill.spec.integration, *skill.spec.ui)
+    }
+    if policy.ui is not None and policy.ui.mode == "required":
+        command_scenarios.update(
+            {
+                (None, f"global:{scenario.id}"): scenario
+                for scenario in policy.ui.global_scenarios
+            }
+        )
+    command_scenario_ids = [scenario_id for _, scenario_id in command_scenarios]
+    contract_by_key = {
+        (contract.skill_name, contract.scenario_id): contract
+        for contract in contracts
+    }
+    failures: list[str] = []
+    if len(command_scenario_ids) != len(set(command_scenario_ids)):
+        failures.append("Skill 与全局 UI scenario id 冲突")
+    assertion_fields = (
+        "regression_assertions",
+        "boundary_assertions",
+        "side_effect_assertions",
+    )
+
+    for key, scenario in command_scenarios.items():
+        contract = contract_by_key.get(key)
+        if contract is None:
+            failures.append(f"{key[1]}: 缺少受信命令场景 assertion contract")
+            continue
+        if not any(getattr(contract, field) for field in assertion_fields):
+            failures.append(f"{contract.scenario_id}: 命令场景至少需要一个断言 step")
+        step_ids = {step.id for step in scenario.steps}
+        for field in assertion_fields:
+            unknown = sorted(set(getattr(contract, field)) - step_ids)
+            if unknown:
+                failures.append(
+                    f"{contract.scenario_id}: {field} 引用未知或跨场景 step "
+                    + ", ".join(unknown)
+                )
+        expected_assertions = scenario.trusted_assertion_groups
+        actual_assertions = {
+            field: getattr(contract, field) for field in assertion_fields
+        }
+        if actual_assertions != expected_assertions:
+            failures.append(
+                f"{contract.scenario_id}: assertion 分类与受信 Skill step 不一致"
+            )
+
+    for contract in contracts:
+        has_assertions = any(
+            getattr(contract, field) for field in assertion_fields
+        )
+        if has_assertions and (
+            contract.skill_name, contract.scenario_id
+        ) not in command_scenarios:
+            failures.append(f"{contract.scenario_id}: 断言无法绑定受信命令场景")
+
+    missing_groups = [
+        field
+        for field in assertion_fields
+        if not any(getattr(contract, field) for contract in contracts)
+    ]
+    if missing_groups:
+        failures.append("验证方案缺少断言类别: " + ", ".join(missing_groups))
+
+    behavior_by_id = {
+        scenario.scenario_id: scenario
+        for scenario in (policy.behavior.scenarios if policy.behavior else ())
+    }
+    contract_by_scenario = {contract.scenario_id: contract for contract in contracts}
+    for scenario_id, expected in behavior_by_id.items():
+        contract = contract_by_scenario.get(scenario_id)
+        if contract is None:
+            failures.append(f"{scenario_id}: 缺少 behavior assertion contract")
+        elif contract.forbidden_changed_paths != expected.forbidden_changed_paths:
+            failures.append(
+                f"{scenario_id}: forbidden_changed_paths 与受信 policy 不一致"
+            )
+    invalid_forbidden = sorted(
+        contract.scenario_id
+        for contract in contracts
+        if contract.forbidden_changed_paths
+        and contract.scenario_id not in behavior_by_id
+    )
+    if invalid_forbidden:
+        failures.append(
+            "forbidden_changed_paths 只能绑定 behavior 场景: "
+            + ", ".join(invalid_forbidden)
+        )
+    return tuple(failures)
+
+
 def _binding_failure(
     *,
     run_id: str,
@@ -183,6 +330,7 @@ def evaluate_trace_gate(
     policy_digest: str,
     expected_skill_digests: dict[str, str],
     scenario_ids: set[str],
+    scenario_input_digests: dict[str, str],
 ) -> GateResult:
     if not scenario_ids:
         return blocked(GateKind.TRACE, "Trace 门禁没有关联的验证场景")
@@ -208,6 +356,8 @@ def evaluate_trace_gate(
         return blocked(GateKind.TRACE, "Trace 采集窗口未完成")
     if not evidence.observations:
         return blocked(GateKind.TRACE, "没有采集到 candidate Trace")
+    if set(scenario_input_digests) != scenario_ids:
+        return blocked(GateKind.TRACE, "Trace 门禁缺少冻结场景输入摘要")
     trace_ids = [item.trace_id for item in evidence.observations]
     if len(trace_ids) != len(set(trace_ids)):
         return blocked(GateKind.TRACE, "Trace evidence 包含重复 trace_id")
@@ -245,6 +395,11 @@ def evaluate_trace_gate(
     evidence_ids: list[str] = []
     for item in evidence.observations:
         evidence_ids.append(item.trace_id)
+        if item.input_digest != scenario_input_digests[item.scenario_id]:
+            return blocked(
+                GateKind.TRACE,
+                f"Trace 场景 {item.scenario_id} 未绑定冻结 Plan 输入",
+            )
         fields = {
             "error_observations": item.error_observations,
             "actual_model": item.actual_model,
@@ -508,6 +663,8 @@ def evaluate_behavior_gate(
     policy_digest: str,
     expected_skill_digests: dict[str, str],
     candidate_traces: dict[str, TraceObservation],
+    scenario_input_digests: dict[str, str],
+    assertion_contracts: tuple[ScenarioAssertionContract, ...] = (),
 ) -> GateResult:
     binding = _binding_failure(
         run_id=run_id,
@@ -542,6 +699,46 @@ def evaluate_behavior_gate(
             "行为证据必须完整覆盖 control 和 candidate",
         )
     configured = {item.scenario_id for item in spec.scenarios}
+    contract_ids = [item.scenario_id for item in assertion_contracts]
+    if len(contract_ids) != len(set(contract_ids)):
+        return blocked(GateKind.BEHAVIOR_COMPARE, "场景断言契约包含重复 scenario_id")
+    invalid_forbidden = sorted(
+        item.scenario_id
+        for item in assertion_contracts
+        if item.forbidden_changed_paths and item.scenario_id not in configured
+    )
+    if invalid_forbidden:
+        return blocked(
+            GateKind.BEHAVIOR_COMPARE,
+            "禁止行为变化只能绑定 behavior 场景: "
+            + ", ".join(invalid_forbidden),
+        )
+    contract_by_scenario = {
+        item.scenario_id: item for item in assertion_contracts
+    }
+    if assertion_contracts:
+        mismatched_forbidden = sorted(
+            expected.scenario_id
+            for expected in spec.scenarios
+            if expected.scenario_id not in contract_by_scenario
+            or contract_by_scenario[
+                expected.scenario_id
+            ].forbidden_changed_paths
+            != expected.forbidden_changed_paths
+        )
+        if mismatched_forbidden:
+            return blocked(
+                GateKind.BEHAVIOR_COMPARE,
+                "forbidden_changed_paths 与受信 behavior policy 不一致: "
+                + ", ".join(mismatched_forbidden),
+            )
+    missing_input_digests = configured - set(scenario_input_digests)
+    if missing_input_digests:
+        return blocked(
+            GateKind.BEHAVIOR_COMPARE,
+            "行为门禁缺少冻结场景输入摘要: "
+            + ", ".join(sorted(missing_input_digests)),
+        )
     required_windows = {
         (scenario_id, variant)
         for scenario_id in configured
@@ -618,9 +815,18 @@ def evaluate_behavior_gate(
             failures.append(
                 f"{expected.scenario_id}: control/candidate 未使用同一冻结输入"
             )
+        expected_input_digest = scenario_input_digests[expected.scenario_id]
+        if (
+            old.input_digest != expected_input_digest
+            or new.input_digest != expected_input_digest
+        ):
+            return blocked(
+                GateKind.BEHAVIOR_COMPARE,
+                f"{expected.scenario_id}: 行为证据未绑定冻结 Plan 输入",
+            )
         if any(
             window_by_key[(expected.scenario_id, variant)].input_digest
-            != old.input_digest
+            != expected_input_digest
             for variant in (Variant.CONTROL, Variant.CANDIDATE)
         ):
             return blocked(
@@ -668,6 +874,18 @@ def evaluate_behavior_gate(
             changed.add("@tool_calls")
         if old.finished != new.finished:
             changed.add("@finished")
+        forbidden_matches = sorted(
+            path
+            for path in changed
+            if any(
+                _path_matches(path, pattern)
+                for pattern in expected.forbidden_changed_paths
+            )
+        )
+        if forbidden_matches:
+            failures.append(
+                f"{expected.scenario_id}: 命中禁止行为变化 {forbidden_matches}"
+            )
         unexpected = sorted(
             path
             for path in changed
@@ -745,4 +963,6 @@ __all__ = [
     "evaluate_command_gate",
     "evaluate_log_gate",
     "evaluate_trace_gate",
+    "validate_assertion_contract_definitions",
+    "validate_assertion_contracts",
 ]

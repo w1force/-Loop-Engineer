@@ -15,6 +15,8 @@ from .gates import (
     evaluate_command_gate,
     evaluate_log_gate,
     evaluate_trace_gate,
+    validate_assertion_contract_definitions,
+    validate_assertion_contracts,
 )
 from .models import (
     BehaviorEvidence,
@@ -125,12 +127,41 @@ class VerificationEngine:
             request.model_dump(mode="python")
         )
         workspace = Path(request.workspace).resolve()
+        if request.replay_digest is None or request.replay_manifest is None:
+            reason = "缺少与 VerificationPlan 绑定的 replay receipt digest/manifest"
+            results = tuple(blocked(kind, reason) for kind in GateKind)
+            return VerificationReport(
+                run_id=request.run_id,
+                cycle=request.cycle,
+                incident_id=request.incident_id,
+                incident_digest=request.incident_digest,
+                plan_digest=request.plan_digest,
+                replay_digest=None,
+                replay_manifest=request.replay_manifest,
+                scenario_input_digests=request.scenario_input_digests,
+                assertion_contracts=request.assertion_contracts,
+                control_ref=request.control_ref,
+                control_digest=request.control_digest,
+                candidate_ref=request.candidate_ref,
+                skill_names=request.skill_names,
+                policy=self.policy,
+                policy_digest=self.policy.digest,
+                gate_results=results,
+                verdict=aggregate_verdict(results),
+            )
         if request.expected_policy_digest != self.policy.digest:
             reason = "VerificationPolicy 与修复前冻结摘要不一致"
             results = tuple(blocked(kind, reason) for kind in GateKind)
             return VerificationReport(
                 run_id=request.run_id,
                 cycle=request.cycle,
+                incident_id=request.incident_id,
+                incident_digest=request.incident_digest,
+                plan_digest=request.plan_digest,
+                replay_digest=request.replay_digest,
+                replay_manifest=request.replay_manifest,
+                scenario_input_digests=request.scenario_input_digests,
+                assertion_contracts=request.assertion_contracts,
                 control_ref=request.control_ref,
                 control_digest=request.control_digest,
                 candidate_ref=request.candidate_ref,
@@ -151,6 +182,13 @@ class VerificationEngine:
             return VerificationReport(
                 run_id=request.run_id,
                 cycle=request.cycle,
+                incident_id=request.incident_id,
+                incident_digest=request.incident_digest,
+                plan_digest=request.plan_digest,
+                replay_digest=request.replay_digest,
+                replay_manifest=request.replay_manifest,
+                scenario_input_digests=request.scenario_input_digests,
+                assertion_contracts=request.assertion_contracts,
                 control_ref=request.control_ref,
                 control_digest=request.control_digest,
                 candidate_ref=request.candidate_ref,
@@ -166,6 +204,13 @@ class VerificationEngine:
             return VerificationReport(
                 run_id=request.run_id,
                 cycle=request.cycle,
+                incident_id=request.incident_id,
+                incident_digest=request.incident_digest,
+                plan_digest=request.plan_digest,
+                replay_digest=request.replay_digest,
+                replay_manifest=request.replay_manifest,
+                scenario_input_digests=request.scenario_input_digests,
+                assertion_contracts=request.assertion_contracts,
                 control_ref=request.control_ref,
                 control_digest=request.control_digest,
                 candidate_ref=request.candidate_ref,
@@ -199,6 +244,44 @@ class VerificationEngine:
             skill_error = (
                 "Verification Skill 与修复前冻结摘要不一致: "
                 + ", ".join(mismatches)
+            )
+
+        contract_failures = (
+            validate_assertion_contract_definitions(
+                request.assertion_contracts,
+                skills=skills,
+                policy=self.policy,
+            )
+            if skill_error is None
+            else ()
+        )
+        if contract_failures:
+            reason = "冻结 assertion contract 无效: " + "; ".join(
+                contract_failures
+            )
+            blocked_results = tuple(blocked(kind, reason) for kind in GateKind)
+            return VerificationReport(
+                run_id=request.run_id,
+                cycle=request.cycle,
+                incident_id=request.incident_id,
+                incident_digest=request.incident_digest,
+                plan_digest=request.plan_digest,
+                replay_digest=request.replay_digest,
+                replay_manifest=request.replay_manifest,
+                scenario_input_digests=request.scenario_input_digests,
+                assertion_contracts=request.assertion_contracts,
+                control_ref=request.control_ref,
+                control_digest=request.control_digest,
+                candidate_ref=request.candidate_ref,
+                candidate_digest=initial_digest,
+                candidate_digest_after=initial_digest,
+                skill_names=request.skill_names,
+                skill_digests=actual_skill_digests,
+                skill_contracts=skill_contracts,
+                policy=self.policy,
+                policy_digest=self.policy.digest,
+                gate_results=blocked_results,
+                verdict=aggregate_verdict(blocked_results),
             )
 
         evidence: list[CommandEvidence] = []
@@ -325,6 +408,10 @@ class VerificationEngine:
             external_block_reason = (
                 f"Verification Skill 解析失败，外部证据契约无法冻结: {skill_error}"
             )
+        elif set(request.scenario_input_digests) != set(trace_log_scenarios):
+            external_block_reason = (
+                "VerificationRunRequest 场景输入摘要与冻结验证场景不一致"
+            )
 
         if external_block_reason is not None:
             results[GateKind.TRACE] = blocked(GateKind.TRACE, external_block_reason)
@@ -349,6 +436,7 @@ class VerificationEngine:
                 skill_names=request.skill_names,
                 skill_digests=actual_skill_digests,
                 scenario_ids=trace_log_scenarios or ("verification-run",),
+                replay_manifest=request.replay_manifest,
             )
             results[GateKind.TRACE], trace_evidence = await self._trace_result(
                 request, trace_log_context, set(trace_log_scenarios)
@@ -358,20 +446,11 @@ class VerificationEngine:
                 if trace_evidence is not None
                 else {}
             )
-            trace_inputs_by_scenario = (
-                {
-                    item.scenario_id: item.input_digest
-                    for item in trace_evidence.observations
-                    if item.input_digest is not None
-                }
-                if trace_evidence is not None
-                else {}
-            )
             results[GateKind.STAGING_LOG], log_evidence = await self._log_result(
                 request,
                 trace_log_context,
                 set(trace_log_scenarios),
-                trace_inputs_by_scenario,
+                request.scenario_input_digests,
             )
             behavior_context = EvidenceCollectionContext(
                 run_id=request.run_id,
@@ -384,11 +463,13 @@ class VerificationEngine:
                 skill_names=request.skill_names,
                 skill_digests=actual_skill_digests,
                 scenario_ids=tuple(sorted(behavior_ids)) or ("verification-run",),
+                replay_manifest=request.replay_manifest,
             )
             results[GateKind.BEHAVIOR_COMPARE], behavior_evidence = await self._behavior_result(
                 request,
                 behavior_context,
                 candidate_traces,
+                request.scenario_input_digests,
             )
 
         try:
@@ -407,6 +488,13 @@ class VerificationEngine:
         return VerificationReport(
             run_id=request.run_id,
             cycle=request.cycle,
+            incident_id=request.incident_id,
+            incident_digest=request.incident_digest,
+            plan_digest=request.plan_digest,
+            replay_digest=request.replay_digest,
+            replay_manifest=request.replay_manifest,
+            scenario_input_digests=request.scenario_input_digests,
+            assertion_contracts=request.assertion_contracts,
             control_ref=request.control_ref,
             control_digest=request.control_digest,
             candidate_ref=request.candidate_ref,
@@ -522,7 +610,7 @@ class VerificationEngine:
                 )
                 items.append(item)
                 evidence.append(item)
-        return evaluate_command_gate(
+        result = evaluate_command_gate(
             gate,
             items,
             expected_contracts=expected,
@@ -533,6 +621,28 @@ class VerificationEngine:
             candidate_ref=request.candidate_ref,
             candidate_digest=candidate_digest,
         )
+        scenario_keys = {
+            (skill_name, scenario_id)
+            for skill_name, scenario_id, _ in scenarios
+        }
+        relevant_contracts = tuple(
+            contract
+            for contract in request.assertion_contracts
+            if (contract.skill_name, contract.scenario_id) in scenario_keys
+        )
+        assertion_failures = validate_assertion_contracts(
+            relevant_contracts,
+            items,
+        )
+        if assertion_failures and result.status is GateStatus.PASS:
+            return GateResult(
+                gate=gate,
+                status=GateStatus.BLOCKED,
+                summary=f"{gate.value} 场景断言证据不完整",
+                evidence_ids=result.evidence_ids,
+                failures=assertion_failures,
+            )
+        return result
 
     async def _trace_result(
         self,
@@ -568,6 +678,7 @@ class VerificationEngine:
                 policy_digest=self.policy.digest,
                 expected_skill_digests=context.skill_digests,
                 scenario_ids=scenario_ids,
+                scenario_input_digests=request.scenario_input_digests,
             ),
             evidence,
         )
@@ -622,6 +733,7 @@ class VerificationEngine:
         request: VerificationRunRequest,
         context: EvidenceCollectionContext,
         candidate_traces: dict[str, TraceObservation],
+        scenario_input_digests: dict[str, str],
     ) -> tuple[GateResult, BehaviorEvidence | None]:
         if self.policy.behavior is None:
             return (
@@ -662,6 +774,8 @@ class VerificationEngine:
                 policy_digest=self.policy.digest,
                 expected_skill_digests=context.skill_digests,
                 candidate_traces=candidate_traces,
+                scenario_input_digests=scenario_input_digests,
+                assertion_contracts=request.assertion_contracts,
             ),
             evidence,
         )

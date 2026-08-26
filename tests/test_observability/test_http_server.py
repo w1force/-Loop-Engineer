@@ -4,6 +4,7 @@ from http.client import HTTPConnection
 import json
 from pathlib import Path
 import threading
+import time
 
 from core.observability import LocalObservabilityStore, normalized_input_digest
 from core.observability.server import ObservabilityHTTPServer
@@ -68,10 +69,36 @@ def test_otlp_is_loopback_ingestable_but_execution_windows_require_coordinator(
         "model": "model-a",
         "tool_calls": [],
     }
+    barrier = {
+        "flush_id": "flush-candidate-window",
+        "collection_id": "candidate-window",
+        "run_id": "run-1",
+        "cycle": 1,
+        "scenario_id": "checkout:case",
+        "variant": "candidate",
+        "input_digest": execution["input_digest"],
+        "signals": ["traces", "logs"],
+        "flush_started_at_ns": 1,
+        "flush_completed_at_ns": 2,
+        "deadline_ns": time.time_ns() + 10_000_000_000,
+    }
     try:
         assert _request(port, "GET", "/healthz")[0] == 200
         assert _request(port, "POST", "/v1/logs", {"resourceLogs": []})[0] == 200
         assert _request(port, "POST", "/api/v1/executions", execution)[0] == 401
+        assert _request(
+            port,
+            "POST",
+            "/api/v1/otlp-flush-barriers",
+            barrier,
+        )[0] == 401
+        assert _request(
+            port,
+            "POST",
+            "/api/v1/otlp-flush-barriers",
+            barrier,
+            token=TOKEN,
+        )[0] == 201
 
         bad = {**execution, "collection_complete": "false"}
         assert _request(

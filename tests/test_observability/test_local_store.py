@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
@@ -8,12 +9,20 @@ from core.observability import (
     CCBDebugLogImporter,
     ExecutionWindow,
     LocalObservabilityStore,
+    OtlpFlushBarrier,
     SQLiteBehaviorEvidenceProvider,
     SQLiteLogEvidenceProvider,
     SQLiteTraceEvidenceProvider,
     normalized_input_digest,
 )
-from core.verification import Variant
+from core.verification import (
+    GateStatus,
+    ReplayEvidenceManifest,
+    ReplayWindowBinding,
+    TraceGateSpec,
+    Variant,
+)
+from core.verification.gates import evaluate_trace_gate
 from core.verification.providers import EvidenceCollectionContext
 
 
@@ -23,11 +32,13 @@ POLICY_DIGEST = "c" * 64
 SKILL_DIGESTS = {"checkout": "d" * 64}
 INPUT_PAYLOAD = {"prompt": "reproduce checkout timeout", "seed": 7}
 INPUT_DIGEST = normalized_input_digest(INPUT_PAYLOAD)
+ORACLE_DIGEST = "e" * 64
+RESULT_DIGEST = "f" * 64
 
 
 def _attr(key: str, value):
     kind = "boolValue" if isinstance(value, bool) else "stringValue"
-    if isinstance(value, int):
+    if isinstance(value, int) and not isinstance(value, bool):
         kind = "intValue"
         value = str(value)
     return {"key": key, "value": {kind: value}}
@@ -39,9 +50,11 @@ def _resource(run_id: str, scenario: str, variant: str):
             _attr("service.name", "claude-code"),
             _attr("service.version", "sha-one"),
             _attr("verification.run_id", run_id),
+            _attr("verification.cycle", 1),
             _attr("verification.scenario_id", scenario),
             _attr("verification.variant", variant),
             _attr("verification.input_digest", INPUT_DIGEST),
+            _attr("verification.collection_id", f"collection-{variant}"),
         ]
     }
 
@@ -111,6 +124,7 @@ def _log_payload(run_id: str, scenario: str, variant: str, trace_id: str):
                                     _attr("input_tokens", 10),
                                     _attr("cache_read_tokens", 20),
                                     _attr("cache_creation_tokens", 12),
+                                    _attr("fallback_used", False),
                                 ],
                             },
                             {
@@ -165,10 +179,29 @@ def _window(run_id: str, scenario: str, variant: str, trace_id: str):
                 "outcome": "success",
             },
         ),
+        oracle_digest=ORACLE_DIGEST,
+        result_sha256=RESULT_DIGEST,
     )
 
 
-def _context() -> EvidenceCollectionContext:
+def _context(store: LocalObservabilityStore) -> EvidenceCollectionContext:
+    bindings = []
+    for row in store.execution_windows("run-1", 1):
+        try:
+            barrier_digest = store.otlp_barrier_digest(row)
+        except Exception:
+            barrier_digest = "0" * 64
+        bindings.append(
+            ReplayWindowBinding(
+                scenario_id=row["scenario_id"],
+                variant=Variant(row["variant"]),
+                input_digest=row["input_digest"],
+                collection_id=row["collection_id"],
+                otlp_barrier_digest=barrier_digest,
+                oracle_digest=ORACLE_DIGEST,
+                result_sha256=RESULT_DIGEST,
+            )
+        )
     return EvidenceCollectionContext(
         run_id="run-1",
         cycle=1,
@@ -180,6 +213,26 @@ def _context() -> EvidenceCollectionContext:
         skill_names=("checkout",),
         skill_digests=SKILL_DIGESTS,
         scenario_ids=("checkout:case",),
+        replay_manifest=ReplayEvidenceManifest(windows=tuple(bindings)),
+    )
+
+
+def _record_and_seal(store: LocalObservabilityStore, window: ExecutionWindow) -> None:
+    store.record_execution(window)
+    store.record_otlp_flush_barrier(
+        OtlpFlushBarrier(
+            flush_id=f"flush-{window.collection_id}",
+            collection_id=window.collection_id,
+            run_id=window.run_id,
+            cycle=window.cycle,
+            scenario_id=window.scenario_id,
+            variant=window.variant,
+            input_digest=window.input_digest,
+            signals=("traces", "logs"),
+            flush_started_at_ns=window.ended_at_ns,
+            flush_completed_at_ns=window.ended_at_ns,
+            deadline_ns=time.time_ns() + 10_000_000_000,
+        )
     )
 
 
@@ -196,18 +249,20 @@ async def test_otlp_ingestion_and_all_three_providers(tmp_path: Path) -> None:
         assert store.ingest_otlp_logs(
             _log_payload("run-1", "checkout:case", variant, trace_id)
         ) == 2
-        store.record_execution(_window("run-1", "checkout:case", variant, trace_id))
+        _record_and_seal(
+            store, _window("run-1", "checkout:case", variant, trace_id)
+        )
 
-    trace = await SQLiteTraceEvidenceProvider(str(database)).collect_trace(_context())
+    trace = await SQLiteTraceEvidenceProvider(str(database)).collect_trace(_context(store))
     assert trace.collection_complete is True
     assert trace.observations[0].trace_id == "bb" * 16
     assert trace.observations[0].session_id == "session-candidate"
     assert trace.observations[0].actual_model == "model-a"
     assert trace.observations[0].input_tokens == 42
-    assert trace.observations[0].fallback_used is None
+    assert trace.observations[0].fallback_used is False
     assert trace.observations[0].finished is True
 
-    logs = await SQLiteLogEvidenceProvider(str(database)).collect_logs(_context())
+    logs = await SQLiteLogEvidenceProvider(str(database)).collect_logs(_context(store))
     assert logs.collection_complete is True
     assert {item.variant for item in logs.observations} == {
         Variant.CONTROL,
@@ -228,7 +283,7 @@ async def test_otlp_ingestion_and_all_three_providers(tmp_path: Path) -> None:
     assert queried[0]["trace_id"] == "bb" * 16
 
     behavior = await SQLiteBehaviorEvidenceProvider(str(database)).collect_behavior(
-        _context()
+        _context(store)
     )
     assert behavior.collection_complete is True
     assert len(behavior.observations) == 2
@@ -245,13 +300,114 @@ async def test_missing_explicit_finished_remains_unknown(tmp_path: Path) -> None
         store.ingest_otlp_traces(
             _trace_payload("run-1", "checkout:case", variant, trace_id)
         )
+        store.ingest_otlp_logs(
+            _log_payload("run-1", "checkout:case", variant, trace_id)
+        )
         window = _window("run-1", "checkout:case", variant, trace_id)
         if variant == "candidate":
             window = ExecutionWindow(**{**window.__dict__, "finished": None})
-        store.record_execution(window)
+        _record_and_seal(store, window)
 
-    trace = await SQLiteTraceEvidenceProvider(str(database)).collect_trace(_context())
+    trace = await SQLiteTraceEvidenceProvider(str(database)).collect_trace(_context(store))
     assert trace.observations[0].finished is None
+
+
+async def test_trace_gate_ignores_non_api_request_metric_gaps(tmp_path: Path) -> None:
+    database = tmp_path / "observability.sqlite3"
+    store = LocalObservabilityStore(database)
+    for variant, trace_id in (
+        ("control", "aa" * 16),
+        ("candidate", "bb" * 16),
+    ):
+        store.ingest_otlp_traces(
+            _trace_payload("run-1", "checkout:case", variant, trace_id)
+        )
+        logs = _log_payload("run-1", "checkout:case", variant, trace_id)
+        records = logs["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        records[:] = [records[0]]
+        store.ingest_otlp_logs(logs)
+        _record_and_seal(
+            store, _window("run-1", "checkout:case", variant, trace_id)
+        )
+
+    context = _context(store)
+    evidence = await SQLiteTraceEvidenceProvider(str(database)).collect_trace(context)
+    result = evaluate_trace_gate(
+        TraceGateSpec(expected_model="model-a"),
+        evidence,
+        run_id=context.run_id,
+        cycle=context.cycle,
+        candidate_ref=context.candidate_ref,
+        candidate_digest=context.candidate_digest,
+        policy_digest=context.policy_digest,
+        expected_skill_digests=context.skill_digests,
+        scenario_ids=set(context.scenario_ids),
+        scenario_input_digests={"checkout:case": INPUT_DIGEST},
+    )
+    assert result.status is GateStatus.PASS
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "missing_metric"),
+    [
+        ("model", "actual_model"),
+        ("input_tokens", "input_tokens"),
+        ("cache_read_tokens", "input_tokens"),
+        ("cache_creation_tokens", "input_tokens"),
+        ("fallback_used", "fallback_used"),
+    ],
+)
+async def test_each_api_request_must_supply_trace_gate_metrics(
+    tmp_path: Path, missing_field: str, missing_metric: str
+) -> None:
+    database = tmp_path / "observability.sqlite3"
+    store = LocalObservabilityStore(database)
+    for variant, trace_id in (
+        ("control", "aa" * 16),
+        ("candidate", "bb" * 16),
+    ):
+        store.ingest_otlp_traces(
+            _trace_payload("run-1", "checkout:case", variant, trace_id)
+        )
+        logs = _log_payload("run-1", "checkout:case", variant, trace_id)
+        if variant == "candidate":
+            records = logs["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+            incomplete_request = {
+                **records[0],
+                "timeUnixNano": "450",
+                "observedTimeUnixNano": "451",
+                "attributes": [
+                    item
+                    for item in records[0]["attributes"]
+                    if item["key"] != missing_field
+                ],
+            }
+            records.insert(1, incomplete_request)
+        store.ingest_otlp_logs(logs)
+        _record_and_seal(
+            store, _window("run-1", "checkout:case", variant, trace_id)
+        )
+
+    context = _context(store)
+    evidence = await SQLiteTraceEvidenceProvider(str(database)).collect_trace(context)
+    assert evidence.collector_error is None
+    assert evidence.collection_complete is True
+    assert getattr(evidence.observations[0], missing_metric) is None
+
+    result = evaluate_trace_gate(
+        TraceGateSpec(expected_model="model-a"),
+        evidence,
+        run_id=context.run_id,
+        cycle=context.cycle,
+        candidate_ref=context.candidate_ref,
+        candidate_digest=context.candidate_digest,
+        policy_digest=context.policy_digest,
+        expected_skill_digests=context.skill_digests,
+        scenario_ids=set(context.scenario_ids),
+        scenario_input_digests={"checkout:case": INPUT_DIGEST},
+    )
+    assert result.status is GateStatus.BLOCKED
+    assert missing_metric in result.summary
 
 
 def test_ccb_debug_import_is_incremental_and_keeps_session(tmp_path: Path) -> None:
@@ -288,6 +444,24 @@ def test_ccb_debug_import_restarts_after_in_place_truncation(tmp_path: Path) -> 
     )
     assert importer.import_file(path) == 1
     assert len(store.search_logs(session_id="session-rotation")) == 2
+
+
+def test_ccb_debug_import_waits_for_complete_trailing_line(tmp_path: Path) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    path = tmp_path / "session-partial.txt"
+    line = "2026-08-24T10:00:00.000Z [ERROR] PartialError request 42 failed"
+    path.write_text(line, encoding="utf-8")
+    importer = CCBDebugLogImporter(store)
+
+    assert importer.import_file(path) == 0
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    assert importer.import_file(path) == 1
+    assert importer.import_file(path) == 0
+
+    rows = store.search_logs(session_id="session-partial", level="ERROR")
+    assert len(rows) == 1
+    assert rows[0]["body"] == "PartialError request 42 failed"
 
 
 def test_failed_tool_result_is_stored_as_error(tmp_path: Path) -> None:
@@ -334,3 +508,181 @@ def test_invalid_otlp_trace_identifier_is_rejected(tmp_path: Path) -> None:
     payload = _trace_payload("run-1", "checkout:case", "candidate", "not-a-trace")
     with pytest.raises(Exception, match="traceId/spanId"):
         store.ingest_otlp_traces(payload)
+
+
+def _ingest_window_pair(
+    store: LocalObservabilityStore, *, seal_candidate: bool = True
+) -> tuple[ExecutionWindow, ExecutionWindow]:
+    windows = []
+    for variant, trace_id in (("control", "aa" * 16), ("candidate", "bb" * 16)):
+        store.ingest_otlp_traces(
+            _trace_payload("run-1", "checkout:case", variant, trace_id)
+        )
+        store.ingest_otlp_logs(
+            _log_payload("run-1", "checkout:case", variant, trace_id)
+        )
+        window = _window("run-1", "checkout:case", variant, trace_id)
+        store.record_execution(window)
+        if variant == "control" or seal_candidate:
+            store.record_otlp_flush_barrier(
+                OtlpFlushBarrier(
+                    flush_id=f"flush-{variant}",
+                    collection_id=window.collection_id,
+                    run_id=window.run_id,
+                    cycle=window.cycle,
+                    scenario_id=window.scenario_id,
+                    variant=window.variant,
+                    input_digest=window.input_digest,
+                    signals=("traces", "logs"),
+                    flush_started_at_ns=window.ended_at_ns,
+                    flush_completed_at_ns=window.ended_at_ns,
+                    deadline_ns=time.time_ns() + 10_000_000_000,
+                )
+            )
+        windows.append(window)
+    return windows[0], windows[1]
+
+
+async def test_missing_otlp_flush_barrier_is_fail_closed(tmp_path: Path) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    _ingest_window_pair(store, seal_candidate=False)
+
+    evidence = await SQLiteTraceEvidenceProvider(str(store.path)).collect_trace(
+        _context(store)
+    )
+
+    assert evidence.collection_complete is False
+    assert "缺少 OTLP flush/watermark barrier" in (evidence.collector_error or "")
+
+    with pytest.raises(Exception, match="等待 OTLP flush barrier 超时"):
+        store.wait_for_otlp_flush_barrier(
+            "collection-candidate", timeout_ms=1, poll_interval_ms=1
+        )
+
+
+async def test_timed_out_or_duplicate_otlp_barrier_is_fail_closed(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    _, candidate = _ingest_window_pair(store, seal_candidate=False)
+    base = {
+        "collection_id": candidate.collection_id,
+        "run_id": candidate.run_id,
+        "cycle": candidate.cycle,
+        "scenario_id": candidate.scenario_id,
+        "variant": candidate.variant,
+        "input_digest": candidate.input_digest,
+        "signals": ("traces", "logs"),
+        "flush_started_at_ns": candidate.ended_at_ns,
+        "flush_completed_at_ns": candidate.ended_at_ns,
+        "deadline_ns": candidate.ended_at_ns - 1,
+    }
+    store.record_otlp_flush_barrier(OtlpFlushBarrier(flush_id="late-1", **base))
+
+    evidence = await SQLiteLogEvidenceProvider(str(store.path)).collect_logs(_context(store))
+    assert evidence.collection_complete is False
+    assert "超时" in (evidence.collector_error or "")
+
+    duplicate = {**base, "deadline_ns": time.time_ns() + 10_000_000_000}
+    store.record_otlp_flush_barrier(
+        OtlpFlushBarrier(flush_id="late-2", **duplicate)
+    )
+    evidence = await SQLiteLogEvidenceProvider(str(store.path)).collect_logs(_context(store))
+    assert evidence.collection_complete is False
+    assert "不唯一" in (evidence.collector_error or "")
+
+
+async def test_late_otlp_after_watermark_is_rejected_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    _ingest_window_pair(store)
+    late = _log_payload("run-1", "checkout:case", "candidate", "bb" * 16)
+    record = late["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
+    record["timeUnixNano"] = "700"
+    record["body"] = {"stringValue": "late exporter record"}
+
+    assert store.ingest_otlp_logs(late) == 0
+    evidence = await SQLiteBehaviorEvidenceProvider(str(store.path)).collect_behavior(
+        _context(store)
+    )
+
+    assert evidence.collection_complete is False
+    assert "晚到数据" in (evidence.collector_error or "")
+
+
+async def test_barrier_can_arrive_before_execution_window_is_persisted(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    for variant, trace_id in (("control", "aa" * 16), ("candidate", "bb" * 16)):
+        store.ingest_otlp_traces(
+            _trace_payload("run-1", "checkout:case", variant, trace_id)
+        )
+        store.ingest_otlp_logs(
+            _log_payload("run-1", "checkout:case", variant, trace_id)
+        )
+        window = _window("run-1", "checkout:case", variant, trace_id)
+        store.record_otlp_flush_barrier(
+            OtlpFlushBarrier(
+                flush_id=f"flush-before-window-{variant}",
+                collection_id=window.collection_id,
+                run_id=window.run_id,
+                cycle=window.cycle,
+                scenario_id=window.scenario_id,
+                variant=window.variant,
+                input_digest=window.input_digest,
+                signals=("traces", "logs"),
+                flush_started_at_ns=window.ended_at_ns,
+                flush_completed_at_ns=window.ended_at_ns,
+                deadline_ns=time.time_ns() + 10_000_000_000,
+            )
+        )
+        store.record_execution(window)
+
+    evidence = await SQLiteTraceEvidenceProvider(str(store.path)).collect_trace(
+        _context(store)
+    )
+    assert evidence.collection_complete is True
+
+
+async def test_receipt_manifest_rejects_replaced_sqlite_window(tmp_path: Path) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    _ingest_window_pair(store)
+    context = _context(store)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE execution_windows SET collection_id = ? "
+            "WHERE run_id = ? AND cycle = ? AND variant = ?",
+            ("replacement-window", "run-1", 1, "candidate"),
+        )
+
+    evidence = await SQLiteLogEvidenceProvider(str(store.path)).collect_logs(context)
+    assert evidence.collection_complete is False
+    assert "replay receipt manifest" in (evidence.collector_error or "")
+
+
+async def test_receipt_manifest_rejects_changed_window_and_barrier_digests(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    _ingest_window_pair(store)
+    context = _context(store)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE execution_windows SET result_sha256 = ? WHERE variant = ?",
+            ("9" * 64, "candidate"),
+        )
+        connection.execute(
+            "UPDATE otlp_flush_barriers SET flush_id = ? WHERE variant = ?",
+            ("changed-flush", "control"),
+        )
+
+    evidence = await SQLiteBehaviorEvidenceProvider(str(store.path)).collect_behavior(
+        context
+    )
+    assert evidence.collection_complete is False
+    assert any(
+        marker in (evidence.collector_error or "")
+        for marker in ("result_sha256", "barrier digest")
+    )

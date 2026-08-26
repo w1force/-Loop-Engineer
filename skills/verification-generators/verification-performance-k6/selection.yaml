@@ -1,0 +1,56 @@
+name: verification-performance-k6
+scenarios:
+  - id: web-workflow-performance
+    when:
+      matched_rules:
+        - performance-regression
+        - latency-regression
+        - throughput-regression
+      changed_paths:
+        - "web/**"
+        - "frontend/**"
+        - "services/**"
+      risk_tags:
+        - performance
+        - web-workflow
+        - browser
+      require_any:
+        - matched_rule
+        - risk_tag
+    selection_prompt: |
+      Select this scenario when the repaired behavior is an authorized web workflow
+      whose latency, error rate, throughput, or Web Vitals must satisfy an existing
+      SLO. Generate protocol and browser functional checks before fixed-seed load
+      scripts, and bind every required metric to a non-zero sample rule.
+    exclusions:
+      - API-only contract validation without a browser workflow
+      - Targets the caller does not own or is not authorized to load-test
+      - Production write workflows without isolated fixtures and verified cleanup
+      - Changes with no pre-approved SLO or comparable baseline
+  - id: web-load-shape-resilience
+    when:
+      matched_rules:
+        - concurrency-regression
+        - saturation-regression
+        - resource-leak
+      changed_paths:
+        - "services/**"
+        - "deploy/**"
+        - "infra/**"
+      risk_tags:
+        - concurrency
+        - stress
+        - soak
+      require_any:
+        - matched_rule
+        - risk_tag
+    selection_prompt: |
+      Select this scenario when a web service change can alter behavior under an
+      approved stress, spike, soak, or breakpoint profile. Generate the smallest
+      applicable load matrix, fixed seed/repetition policy, load-generator health
+      evidence, and reversible setup/cleanup. Treat infrastructure saturation as
+      BLOCKED rather than a product result.
+    exclusions:
+      - Capacity exploration with no pass/fail release threshold
+      - Unbounded or user-unapproved cloud spend
+      - Destructive operations that lack a dry-run or isolated namespace

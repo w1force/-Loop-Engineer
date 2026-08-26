@@ -66,12 +66,71 @@ def _validate_skill_digest_map(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
+def _validate_scenario_input_digest_map(value: dict[str, str]) -> dict[str, str]:
+    if not value:
+        raise ValueError("scenario_input_digests 不能为空")
+    if any(not scenario_id.strip() for scenario_id in value):
+        raise ValueError("scenario_input_digests 包含空场景 ID")
+    if any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in value.values()):
+        raise ValueError("scenario_input_digests 必须是 SHA-256")
+    return value
+
+
 class VerificationModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         str_strip_whitespace=True,
         frozen=True,
     )
+
+
+class ReplayWindowBinding(VerificationModel):
+    """Immutable pointer from a replay receipt to one evidence window."""
+
+    scenario_id: str = Field(min_length=1)
+    variant: "Variant"
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    collection_id: str = Field(min_length=1)
+    otlp_barrier_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    oracle_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReplayEvidenceManifest(VerificationModel):
+    schema_version: Literal["verification-replay-evidence-manifest/v1"] = (
+        "verification-replay-evidence-manifest/v1"
+    )
+    windows: tuple[ReplayWindowBinding, ...] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _complete_pairs(self) -> Self:
+        keys = [(item.scenario_id, item.variant) for item in self.windows]
+        if len(keys) != len(set(keys)):
+            raise ValueError("replay manifest 场景窗口不能重复")
+        collection_ids = [item.collection_id for item in self.windows]
+        if len(collection_ids) != len(set(collection_ids)):
+            raise ValueError("replay manifest collection_id 不能重复")
+        scenario_ids = {item.scenario_id for item in self.windows}
+        expected = {
+            (scenario_id, variant)
+            for scenario_id in scenario_ids
+            for variant in (Variant.CONTROL, Variant.CANDIDATE)
+        }
+        if set(keys) != expected:
+            raise ValueError("replay manifest 必须完整覆盖 control/candidate")
+        for scenario_id in scenario_ids:
+            digests = {
+                item.input_digest
+                for item in self.windows
+                if item.scenario_id == scenario_id
+            }
+            if len(digests) != 1:
+                raise ValueError("replay manifest 的 control/candidate 输入摘要不一致")
+        return self
+
+    @property
+    def by_key(self) -> dict[tuple[str, "Variant"], ReplayWindowBinding]:
+        return {(item.scenario_id, item.variant): item for item in self.windows}
 
 
 class GateKind(str, Enum):
@@ -126,6 +185,9 @@ class CommandSpec(VerificationModel):
     stderr_contains: tuple[str, ...] = ()
     forbidden_output_patterns: tuple[str, ...] = ()
     env: dict[str, str] = Field(default_factory=dict)
+    assertion_categories: tuple[
+        Literal["regression", "boundary", "side_effect"], ...
+    ] = ()
 
     @field_validator("argv")
     @classmethod
@@ -188,6 +250,16 @@ class CommandSpec(VerificationModel):
             raise ValueError("输出匹配标记不能为空")
         return value
 
+    @field_validator("assertion_categories")
+    @classmethod
+    def _unique_assertion_categories(
+        cls,
+        value: tuple[Literal["regression", "boundary", "side_effect"], ...],
+    ) -> tuple[Literal["regression", "boundary", "side_effect"], ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("assertion_categories 不能重复")
+        return value
+
     @property
     def digest(self) -> str:
         encoded = json.dumps(
@@ -231,6 +303,38 @@ class ScenarioSpec(VerificationModel):
         if len(ids) != len(set(ids)):
             raise ValueError("scenario step id 不能重复")
         return value
+
+    @model_validator(mode="after")
+    def _complete_explicit_assertion_categories(self) -> Self:
+        categorized = [bool(step.assertion_categories) for step in self.steps]
+        if any(categorized) and not all(categorized):
+            raise ValueError(
+                "显式 assertion 分类时，每个 scenario step 都必须声明类别"
+            )
+        return self
+
+    @property
+    def trusted_assertion_groups(self) -> dict[str, tuple[str, ...]]:
+        """Derive assertion ownership from the trusted scenario definition.
+
+        Legacy Skills without explicit categories conservatively require every
+        step in all three groups.  Once categories are declared, every step is
+        classified by the Skill rather than by a planning Agent.
+        """
+
+        explicit_categories = any(step.assertion_categories for step in self.steps)
+        return {
+            field_name: tuple(
+                step.id
+                for step in self.steps
+                if not explicit_categories or category in step.assertion_categories
+            )
+            for field_name, category in (
+                ("regression_assertions", "regression"),
+                ("boundary_assertions", "boundary"),
+                ("side_effect_assertions", "side_effect"),
+            )
+        }
 
 
 class VerificationSkillSpec(VerificationModel):
@@ -353,29 +457,36 @@ class BehaviorScenarioSpec(VerificationModel):
     expected_candidate_outcome: Literal["success"] = "success"
     allowed_changed_paths: tuple[str, ...] = ()
     required_changed_paths: tuple[str, ...] = ()
+    forbidden_changed_paths: tuple[str, ...] = ()
     reproducer: StrictBool = False
     require_trace_shape: Literal[True] = True
 
+    @field_validator("forbidden_changed_paths")
+    @classmethod
+    def _valid_forbidden_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not pattern for pattern in value):
+            raise ValueError("forbidden_changed_paths 不能包含空值")
+        if len(value) != len(set(value)):
+            raise ValueError("forbidden_changed_paths 不能重复")
+        return value
+
     @model_validator(mode="after")
     def _reproducer_has_expected_change(self) -> Self:
+        if self.reproducer and self.expected_control_outcome != "failure":
+            raise ValueError(
+                "reproducer 必须明确声明 control=failure、candidate=success"
+            )
         if (
             not self.reproducer
             and self.expected_control_outcome is not None
             and self.expected_control_outcome != self.expected_candidate_outcome
         ):
             raise ValueError("control/candidate outcome 变化必须显式标记 reproducer")
-        if self.reproducer and (
-            self.expected_control_outcome is None
-            or (
-                self.expected_control_outcome == self.expected_candidate_outcome
-                and not self.required_changed_paths
-            )
-        ):
-            raise ValueError(
-                "reproducer 必须声明 control/candidate outcome 变化或 required_changed_paths"
-            )
         if not set(self.required_changed_paths).issubset(self.allowed_changed_paths):
             raise ValueError("required_changed_paths 必须同时列入 allowed_changed_paths")
+        overlap = set(self.allowed_changed_paths) & set(self.forbidden_changed_paths)
+        if overlap:
+            raise ValueError("行为路径不能同时 allowed 和 forbidden")
         patterns = (*self.allowed_changed_paths, *self.required_changed_paths)
         protected = [
             pattern
@@ -446,6 +557,7 @@ class VerificationPolicy(VerificationModel):
     staging_log: LogGateSpec | None = None
     behavior: BehaviorGateSpec | None = None
     ui: UIGateSpec | None = None
+    required_skills_by_rule: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     sandbox_mode: Literal["required"] = "required"
     evidence_timeout_ms: StrictInt = Field(default=120_000, ge=100, le=900_000)
     workspace_ignore: tuple[str, ...] = (
@@ -472,6 +584,31 @@ class VerificationPolicy(VerificationModel):
             )
         return value
 
+    @field_validator("required_skills_by_rule")
+    @classmethod
+    def _valid_required_skills_by_rule(
+        cls, value: dict[str, tuple[str, ...]]
+    ) -> dict[str, tuple[str, ...]]:
+        for matched_rule, skill_names in value.items():
+            if not matched_rule or matched_rule != matched_rule.strip():
+                raise ValueError("required_skills_by_rule 包含非法 matched_rule")
+            if not skill_names:
+                raise ValueError(
+                    f"matched_rule {matched_rule} 必须配置至少一个 required Skill"
+                )
+            if len(skill_names) != len(set(skill_names)):
+                raise ValueError(
+                    f"matched_rule {matched_rule} 的 required Skills 不能重复"
+                )
+            invalid = [
+                name for name in skill_names if not _SKILL_NAME.fullmatch(name)
+            ]
+            if invalid:
+                raise ValueError(
+                    f"matched_rule {matched_rule} 包含非法 required Skill 名称"
+                )
+        return value
+
     @property
     def digest(self) -> str:
         encoded = json.dumps(
@@ -483,9 +620,84 @@ class VerificationPolicy(VerificationModel):
         return sha256(encoded).hexdigest()
 
 
+class ScenarioAssertionContract(VerificationModel):
+    """Frozen per-scenario assertions selected before evidence collection."""
+
+    scenario_id: str = Field(min_length=1)
+    skill_name: str | None = Field(default=None, min_length=1)
+    forbidden_changed_paths: tuple[str, ...] = ()
+    regression_assertions: tuple[str, ...] = ()
+    boundary_assertions: tuple[str, ...] = ()
+    side_effect_assertions: tuple[str, ...] = ()
+
+    @field_validator("skill_name")
+    @classmethod
+    def _valid_skill_name(cls, value: str | None) -> str | None:
+        if value is not None and not _SKILL_NAME.fullmatch(value):
+            raise ValueError("assertion contract 包含非法 Skill 名称")
+        return value
+
+    @field_validator(
+        "forbidden_changed_paths",
+        "regression_assertions",
+        "boundary_assertions",
+        "side_effect_assertions",
+    )
+    @classmethod
+    def _non_empty_unique_items(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not item for item in value):
+            raise ValueError("assertion contract 不能包含空值")
+        if len(value) != len(set(value)):
+            raise ValueError("assertion contract 不能包含重复值")
+        return value
+
+    @model_validator(mode="after")
+    def _skill_matches_scenario(self) -> Self:
+        if self.skill_name is not None and not self.scenario_id.startswith(
+            self.skill_name + ":"
+        ):
+            raise ValueError("assertion contract 的 scenario_id 与 skill_name 不一致")
+        return self
+
+
+def _validate_assertion_contract_coverage(
+    contracts: tuple[ScenarioAssertionContract, ...],
+    scenario_input_digests: dict[str, str],
+    skill_names: tuple[str, ...],
+) -> None:
+    scenario_ids = [item.scenario_id for item in contracts]
+    if len(scenario_ids) != len(set(scenario_ids)):
+        raise ValueError("assertion_contracts 的 scenario_id 不能重复")
+    if set(scenario_ids) != set(scenario_input_digests):
+        missing = sorted(set(scenario_input_digests) - set(scenario_ids))
+        extra = sorted(set(scenario_ids) - set(scenario_input_digests))
+        raise ValueError(
+            "assertion_contracts 必须精确覆盖 scenario_input_digests; "
+            f"missing={missing}, extra={extra}"
+        )
+    unselected = sorted(
+        {
+            item.skill_name
+            for item in contracts
+            if item.skill_name is not None and item.skill_name not in skill_names
+        }
+    )
+    if unselected:
+        raise ValueError(
+            "assertion_contracts 引用了未选中的 Skill: " + ", ".join(unselected)
+        )
+
+
 class VerificationRunRequest(VerificationModel):
     run_id: str = Field(default_factory=lambda: str(uuid4()), min_length=1)
     cycle: StrictInt = Field(default=1, ge=1, le=ARTICLE_MAX_VERIFICATION_ATTEMPTS)
+    incident_id: str = Field(min_length=1)
+    incident_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replay_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    replay_manifest: ReplayEvidenceManifest | None = None
+    scenario_input_digests: dict[str, str] = Field(min_length=1)
+    assertion_contracts: tuple[ScenarioAssertionContract, ...] = Field(min_length=1)
     workspace: str = Field(min_length=1)
     control_ref: str = Field(min_length=1)
     control_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -512,12 +724,31 @@ class VerificationRunRequest(VerificationModel):
             raise ValueError("skill_names 包含非法名称")
         return value
 
+    @field_validator("scenario_input_digests")
+    @classmethod
+    def _valid_scenario_input_digests(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_scenario_input_digest_map(value)
+
     @model_validator(mode="after")
     def _skill_digests_match_names(self) -> Self:
         if set(self.expected_skill_digests) != set(self.skill_names):
             raise ValueError("expected_skill_digests 必须精确覆盖 skill_names")
         if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in self.expected_skill_digests.values()):
             raise ValueError("expected_skill_digests 必须是 SHA-256")
+        _validate_assertion_contract_coverage(
+            self.assertion_contracts,
+            self.scenario_input_digests,
+            self.skill_names,
+        )
+        if self.replay_manifest is not None:
+            manifest_inputs = {
+                item.scenario_id: item.input_digest
+                for item in self.replay_manifest.windows
+            }
+            if manifest_inputs != self.scenario_input_digests:
+                raise ValueError("replay_manifest 未精确绑定冻结场景输入")
+            if self.replay_digest is None:
+                raise ValueError("replay_manifest 缺少 replay_digest")
         return self
 
 
@@ -871,6 +1102,13 @@ class VerificationReport(VerificationModel):
     schema_version: Literal["verification-report/v1"] = "verification-report/v1"
     run_id: str
     cycle: StrictInt = Field(ge=1, le=ARTICLE_MAX_VERIFICATION_ATTEMPTS)
+    incident_id: str = Field(min_length=1)
+    incident_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replay_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    replay_manifest: ReplayEvidenceManifest | None = None
+    scenario_input_digests: dict[str, str] = Field(min_length=1)
+    assertion_contracts: tuple[ScenarioAssertionContract, ...] = Field(min_length=1)
     control_ref: str = Field(min_length=1)
     control_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     candidate_ref: str = Field(min_length=1)
@@ -904,10 +1142,27 @@ class VerificationReport(VerificationModel):
             raise ValueError("skill_names 必须非空、合法且不重复")
         return value
 
+    @field_validator("scenario_input_digests")
+    @classmethod
+    def _valid_scenario_input_digests(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_scenario_input_digest_map(value)
+
     @model_validator(mode="after")
     def _verdict_must_match_machine_gates(self) -> Self:
         if self.policy.digest != self.policy_digest:
             raise ValueError("report policy 内容与 policy_digest 不一致")
+        _validate_assertion_contract_coverage(
+            self.assertion_contracts,
+            self.scenario_input_digests,
+            self.skill_names,
+        )
+        if self.replay_manifest is not None:
+            manifest_inputs = {
+                item.scenario_id: item.input_digest
+                for item in self.replay_manifest.windows
+            }
+            if manifest_inputs != self.scenario_input_digests:
+                raise ValueError("report replay_manifest 未精确绑定冻结场景输入")
         counts = {kind: 0 for kind in GateKind}
         for result in self.gate_results:
             counts[result.gate] += 1
@@ -943,6 +1198,10 @@ class VerificationReport(VerificationModel):
                 f"verdict={self.verdict.value} 与机器 gate={expected.value} 不一致"
             )
         if self.verdict is VerificationVerdict.VERIFIED:
+            if self.replay_digest is None:
+                raise ValueError("VERIFIED 必须绑定通过的 replay receipt digest")
+            if self.replay_manifest is None:
+                raise ValueError("VERIFIED 必须绑定 replay receipt evidence manifest")
             if (
                 self.candidate_digest is None
                 or self.candidate_digest_after != self.candidate_digest
@@ -1075,6 +1334,8 @@ class VerificationReport(VerificationModel):
             evaluate_command_gate,
             evaluate_log_gate,
             evaluate_trace_gate,
+            validate_assertion_contract_definitions,
+            validate_assertion_contracts,
         )
 
         assert self.candidate_digest is not None
@@ -1083,6 +1344,26 @@ class VerificationReport(VerificationModel):
         assert self.behavior_evidence is not None
 
         recomputed: dict[GateKind, GateResult] = {}
+
+        definition_failures = validate_assertion_contract_definitions(
+            self.assertion_contracts,
+            skills=contracts.values(),
+            policy=self.policy,
+        )
+        if definition_failures:
+            raise ValueError(
+                "VERIFIED 的 assertion contract 与受信 Skill/Policy 不一致: "
+                + "; ".join(definition_failures)
+            )
+        assertion_failures = validate_assertion_contracts(
+            self.assertion_contracts,
+            self.command_evidence,
+        )
+        if assertion_failures:
+            raise ValueError(
+                "VERIFIED 的 assertion contract 与原始命令证据不一致: "
+                + "; ".join(assertion_failures)
+            )
 
         def command_result(
             gate: GateKind,
@@ -1209,12 +1490,6 @@ class VerificationReport(VerificationModel):
             else set()
         )
         context_ids = integration_ids | behavior_ids | set(ui_id_list)
-        trace_inputs_by_scenario = {
-            item.scenario_id: item.input_digest
-            for item in self.trace_evidence.observations
-            if item.input_digest is not None
-        }
-
         recomputed[GateKind.TRACE] = (
             evaluate_trace_gate(
                 self.policy.trace,
@@ -1226,6 +1501,7 @@ class VerificationReport(VerificationModel):
                 policy_digest=self.policy_digest,
                 expected_skill_digests=self.skill_digests,
                 scenario_ids=context_ids,
+                scenario_input_digests=self.scenario_input_digests,
             )
             if self.policy.trace is not None
             else blocked(GateKind.TRACE, "Trace 门禁配置缺失")
@@ -1243,7 +1519,7 @@ class VerificationReport(VerificationModel):
                 policy_digest=self.policy_digest,
                 expected_skill_digests=self.skill_digests,
                 scenario_ids=context_ids,
-                scenario_input_digests=trace_inputs_by_scenario,
+                scenario_input_digests=self.scenario_input_digests,
             )
             if self.policy.staging_log is not None
             else blocked(GateKind.STAGING_LOG, "预发日志门禁配置缺失")
@@ -1264,6 +1540,8 @@ class VerificationReport(VerificationModel):
                 policy_digest=self.policy_digest,
                 expected_skill_digests=self.skill_digests,
                 candidate_traces=candidate_traces,
+                scenario_input_digests=self.scenario_input_digests,
+                assertion_contracts=self.assertion_contracts,
             )
             if self.policy.behavior is not None
             else blocked(GateKind.BEHAVIOR_COMPARE, "行为对比门禁配置缺失")
@@ -1297,7 +1575,10 @@ __all__ = [
     "LogEvidence",
     "LogGateSpec",
     "LogObservation",
+    "ReplayEvidenceManifest",
+    "ReplayWindowBinding",
     "ResolvedVerificationSkill",
+    "ScenarioAssertionContract",
     "ScenarioSpec",
     "ScenarioCollection",
     "TraceEvidence",
