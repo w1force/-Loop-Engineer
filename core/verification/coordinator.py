@@ -19,14 +19,6 @@ from uuid import uuid4
 
 from pydantic import Field, StrictInt, field_validator, model_validator
 
-from core.contracts.failure import FailureOwner, NextAction, StageName
-from core.orchestrator.router import (
-    FailureRouter,
-    classify_exception,
-    classify_replay_failures,
-    classify_verification_report,
-)
-
 from .engine import VerificationEngine
 from .models import (
     ARTICLE_MAX_VERIFICATION_ATTEMPTS,
@@ -477,6 +469,17 @@ class VerificationCoordinator:
         release_action: VerifiedReleaseAction | None,
         escalation_handler: EscalationHandler | None,
     ) -> CoordinatorOutcome:
+        # Lazy import breaks the module-load cycle
+        # (orchestrator.router -> verification.models -> verification.__init__ ->
+        #  coordinator). These are only needed at run time.
+        from core.contracts.failure import StageName
+        from core.orchestrator.router import (
+            FailureRouter,
+            classify_exception,
+            classify_replay_failures,
+            classify_verification_report,
+        )
+
         control_workspace = Path(request.control_workspace).resolve()
         candidate_workspace = Path(request.candidate_workspace).resolve()
         control_digest = await asyncio.to_thread(
@@ -767,6 +770,8 @@ class VerificationCoordinator:
         ``(state, repair_feedback, outcome)`` — a non-None outcome means return it,
         otherwise ``continue`` with ``repair_feedback`` as the next round's input.
         """
+
+        from core.contracts.failure import FailureOwner, NextAction
 
         decision = router.route(findings, repair_rounds_used=cycle - 1)
         summaries = tuple(f.summary for f in findings) or ("unspecified failure",)
