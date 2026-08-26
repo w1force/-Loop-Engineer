@@ -1,0 +1,14 @@
+{
+  "run_id": "CONFIGURE_RUN_ID",
+  "cycle": 1,
+  "workspace": "/Users/wangzheng.440/claude-code",
+  "control_ref": "CONFIGURE_CONTROL_COMMIT_SHA",
+  "control_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "candidate_ref": "CONFIGURE_CANDIDATE_REF",
+  "expected_candidate_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "expected_policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "skill_names": ["ccb-regression"],
+  "expected_skill_digests": {
+    "ccb-regression": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

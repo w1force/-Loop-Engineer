@@ -31,3 +31,4 @@ tmp-dir/
 # 临时文件夹
 logs/
 runs/
+.loop-engineer/

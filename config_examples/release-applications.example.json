@@ -1,0 +1,22 @@
+{
+  "schema_version": "release-applications/v1",
+  "applications": [
+    {
+      "app_id": "claude-code-best",
+      "repository_path": "/Users/wangzheng.440/claude-code",
+      "remote_name": "origin",
+      "remote_url": "https://github.com/claude-code-best/claude-code.git",
+      "github_repository": "claude-code-best/claude-code",
+      "base_branch": "main",
+      "reviewers": ["CONFIGURE_GITHUB_REVIEWER"],
+      "github_api_url": "https://api.github.com",
+      "verification_evidence_root": "/Users/wangzheng.440/.loop-engineer/evidence",
+      "verification_policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "verification_skill_digests": {
+        "CONFIGURE_DOMAIN_SKILL": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "verification_signing_key_env": "LOOP_ENGINEER_VERIFICATION_SIGNING_KEY",
+      "release_receipt_root": "/Users/wangzheng.440/.loop-engineer/releases"
+    }
+  ]
+}
