@@ -355,81 +355,45 @@ def _run_request(tmp_path: Path) -> CoordinatorRunRequest:
     )
 
 
-@pytest.mark.asyncio
-async def test_submit_routes_configured_workflow_through_coordinator(
-    tmp_path: Path,
-) -> None:
-    provider = _UnusedProvider()
-    coordinator = object.__new__(VerificationCoordinator)
-    coordinator.plan_freezer = SimpleNamespace(policy=VerificationPolicy())
-    calls = []
+def test_agent_config_rejects_incident_workflow_fields(tmp_path: Path) -> None:
+    """The incident workflow no longer rides on a normal agent session.
 
-    async def run(request, **adapters):
-        calls.append((request, adapters))
-        return CoordinatorOutcome(
-            run_id=request.run_id,
-            incident_id=request.incident.incident_id,
-            status=CoordinatorStatus.VERIFIED,
-            cycle=1,
-            evidence_location=str(tmp_path / "evidence"),
-        )
+    submit()/AgentConfig used to accept a coordinator + run request and branch into
+    the whole diagnose->repair->verify->release loop. That path is removed; the loop
+    is driven by the LoopEngineer orchestrator / VerificationCoordinator directly.
+    """
 
-    coordinator.run = run
-    request = _run_request(tmp_path)
-    config = AgentConfig(
-        provider=provider,
-        system="main system",
-        model="test-model",
-        max_tokens=1024,
-        cwd=str(tmp_path),
-        transcript_path=str(tmp_path / "transcript.jsonl"),
-        verification_coordinator=coordinator,
-        verification_run_request=request,
-    )
-    state = AgentState(cwd=str(tmp_path))
-    tracer = _RecordingTracer()
+    for field in (
+        "verification_coordinator",
+        "verification_run_request",
+        "verification_release_action",
+        "verification_escalation_handler",
+    ):
+        with pytest.raises(TypeError):
+            AgentConfig(
+                provider=_UnusedProvider(),
+                system="main system",
+                model="test-model",
+                max_tokens=1024,
+                cwd=str(tmp_path),
+                **{field: object()},
+            )
 
-    results = [item async for item in submit("repair it", state, config, tracer)]
+    import dataclasses
 
-    assert len(results) == 1
-    assert results[0]["subtype"] == "success"
-    assert results[0]["code_fix_verified"] is True
-    assert results[0]["verification"]["status"] == "verified"
-    assert len(calls) == 1
-    assert set(calls[0][1]) == {
-        "repair_agent",
-        "lightweight_verifier",
-        "planner",
-        "release_action",
-        "escalation_handler",
-    }
-    assert provider.calls == 0
-    assert isinstance(state.messages[0], UserMessage)
-    assert [event.kind for event in tracer.events] == [
-        TraceKind.VERIFICATION_START,
-        TraceKind.VERIFICATION_END,
-    ]
-
-
-@pytest.mark.asyncio
-async def test_submit_fails_closed_when_coordinator_config_is_partial(
-    tmp_path: Path,
-) -> None:
-    config = AgentConfig(
-        provider=_UnusedProvider(),
-        system="main system",
-        model="test-model",
-        max_tokens=1024,
-        cwd=str(tmp_path),
-        verification_run_request=_run_request(tmp_path),
+    names = {f.name for f in dataclasses.fields(AgentConfig)}
+    assert not (
+        names
+        & {
+            "verification_coordinator",
+            "verification_run_request",
+            "verification_release_action",
+            "verification_escalation_handler",
+        }
     )
 
-    results = [
-        item
-        async for item in submit(
-            "repair it", AgentState(cwd=str(tmp_path)), config, NoopTracer()
-        )
-    ]
 
-    assert results[0]["subtype"] == "error_verification_setup"
-    assert results[0]["is_error"] is True
+def test_submit_has_no_coordinator_entrypoint() -> None:
+    import core.agent_loop as agent_loop
+
+    assert not hasattr(agent_loop, "_submit_with_verification_coordinator")

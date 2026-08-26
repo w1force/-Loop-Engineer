@@ -19,6 +19,14 @@ from uuid import uuid4
 
 from pydantic import Field, StrictInt, field_validator, model_validator
 
+from core.contracts.failure import FailureOwner, NextAction, StageName
+from core.orchestrator.router import (
+    FailureRouter,
+    classify_exception,
+    classify_replay_failures,
+    classify_verification_report,
+)
+
 from .engine import VerificationEngine
 from .models import (
     ARTICLE_MAX_VERIFICATION_ATTEMPTS,
@@ -486,6 +494,7 @@ class VerificationCoordinator:
             status=CoordinatorStatus.RUNNING,
         )
         self.state_store.initialize(state)
+        router = FailureRouter(max_repair_rounds=request.max_cycles)
         prior_failures: tuple[str, ...] = ()
         latest_evidence: str | None = None
 
@@ -602,10 +611,21 @@ class VerificationCoordinator:
                 state = self._replace_cycle(state, record)
                 self.state_store.save(state)
                 if not receipt.passed:
-                    raise RuntimeError(
-                        "control/candidate replay rejected: "
-                        + "; ".join(receipt.failures)
+                    replay_findings = classify_replay_failures(
+                        receipt.failures, candidate_digest=candidate.candidate_digest
                     )
+                    state, prior_failures, outcome = await self._route_and_record(
+                        findings=replay_findings,
+                        state=state,
+                        cycle=cycle,
+                        router=router,
+                        request=request,
+                        escalation_handler=escalation_handler,
+                        latest_evidence=latest_evidence,
+                    )
+                    if outcome is not None:
+                        return outcome
+                    continue
 
                 report = await self.engine.verify(
                     plan.to_run_request(replay_receipt=receipt)
@@ -635,7 +655,18 @@ class VerificationCoordinator:
                 self.state_store.save(state)
 
                 if report.verdict is not VerificationVerdict.VERIFIED:
-                    prior_failures = record.failures
+                    report_findings = classify_verification_report(report)
+                    state, prior_failures, outcome = await self._route_and_record(
+                        findings=report_findings,
+                        state=state,
+                        cycle=cycle,
+                        router=router,
+                        request=request,
+                        escalation_handler=escalation_handler,
+                        latest_evidence=latest_evidence,
+                    )
+                    if outcome is not None:
+                        return outcome
                     continue
 
                 state = state.model_copy(update={"status": CoordinatorStatus.VERIFIED})
@@ -694,19 +725,91 @@ class VerificationCoordinator:
                     release_reference=release_reference,
                 )
             except Exception as exc:
-                prior_failures = (f"{type(exc).__name__}: {exc}",)
-                current = state.cycles[-1]
-                current = current.model_copy(
-                    update={"stage": CycleStage.COMPLETE, "failures": prior_failures}
+                exc_findings = (classify_exception(exc, stage=StageName.VERIFICATION),)
+                state, prior_failures, outcome = await self._route_and_record(
+                    findings=exc_findings,
+                    state=state,
+                    cycle=cycle,
+                    router=router,
+                    request=request,
+                    escalation_handler=escalation_handler,
+                    latest_evidence=latest_evidence,
                 )
-                state = self._replace_cycle(state, current)
-                self.state_store.save(state)
+                if outcome is not None:
+                    return outcome
 
+        return await self._escalate(
+            state=state,
+            request=request,
+            failures=prior_failures or ("verification attempts exhausted",),
+            escalation_handler=escalation_handler,
+            cycle=request.max_cycles,
+            latest_evidence=latest_evidence,
+        )
+
+    async def _route_and_record(
+        self,
+        *,
+        findings,
+        state: CoordinatorState,
+        cycle: int,
+        router: FailureRouter,
+        request: CoordinatorRunRequest,
+        escalation_handler: "EscalationHandler | None",
+        latest_evidence: str | None,
+    ) -> tuple[CoordinatorState, tuple[str, ...], CoordinatorOutcome | None]:
+        """Route a cycle's structured failures.
+
+        Only an ``owner == REPAIR`` governing failure feeds the next repair round;
+        every other owner (infrastructure/policy/integrity/observability/diagnosis)
+        is terminal for this run and escalates immediately, instead of silently
+        consuming repair rounds as the old catch-all did. Returns
+        ``(state, repair_feedback, outcome)`` — a non-None outcome means return it,
+        otherwise ``continue`` with ``repair_feedback`` as the next round's input.
+        """
+
+        decision = router.route(findings, repair_rounds_used=cycle - 1)
+        summaries = tuple(f.summary for f in findings) or ("unspecified failure",)
+        current = state.cycles[-1].model_copy(
+            update={"stage": CycleStage.COMPLETE, "failures": summaries}
+        )
+        state = self._replace_cycle(state, current)
+        self.state_store.save(state)
+        if decision.next_action is NextAction.NEW_REPAIR_ROUND:
+            repair_feedback = (
+                tuple(f.summary for f in findings if f.owner is FailureOwner.REPAIR)
+                or summaries
+            )
+            return state, repair_feedback, None
+        outcome = await self._escalate(
+            state=state,
+            request=request,
+            failures=(
+                f"[{decision.owner.value} -> {decision.next_action.value}] "
+                + decision.reason,
+            )
+            + summaries,
+            escalation_handler=escalation_handler,
+            cycle=cycle,
+            latest_evidence=latest_evidence,
+        )
+        return state, (), outcome
+
+    async def _escalate(
+        self,
+        *,
+        state: CoordinatorState,
+        request: CoordinatorRunRequest,
+        failures: tuple[str, ...],
+        escalation_handler: "EscalationHandler | None",
+        cycle: int,
+        latest_evidence: str | None,
+    ) -> CoordinatorOutcome:
         escalation = HumanEscalation(
             run_id=request.run_id,
             incident_id=request.incident.incident_id,
             exhausted_cycles=request.max_cycles,
-            failures=prior_failures or ("verification attempts exhausted",),
+            failures=failures,
         )
         escalation_reference = None
         if escalation_handler is not None:
@@ -722,7 +825,7 @@ class VerificationCoordinator:
             run_id=request.run_id,
             incident_id=request.incident.incident_id,
             status=CoordinatorStatus.ESCALATED,
-            cycle=request.max_cycles,
+            cycle=cycle,
             evidence_location=latest_evidence,
             escalation_reference=escalation_reference,
             failures=escalation.failures,
