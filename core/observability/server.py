@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import gzip
 import hmac
 import json
 from pathlib import Path
@@ -34,11 +35,43 @@ class _Handler(BaseHTTPRequestHandler):
         expected = f"Bearer {token}"
         return hmac.compare_digest(self.headers.get("Authorization", ""), expected)
 
+    def _read_raw_body(self) -> bytes:
+        """Read the request body across the framings real OTLP/HTTP clients use.
+
+        The OpenTelemetry HTTP exporter streams its body with
+        ``Transfer-Encoding: chunked`` (no Content-Length) and may gzip it. The
+        earlier Content-Length-only reader rejected those with a 400, so no CCB
+        telemetry ever landed. Handle chunked + gzip in addition to Content-Length.
+        """
+
+        transfer_encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in transfer_encoding:
+            body = bytearray()
+            while True:
+                size_line = self.rfile.readline().split(b";", 1)[0].strip()
+                if not size_line:
+                    continue
+                size = int(size_line, 16)
+                if size == 0:
+                    self.rfile.readline()  # consume the trailing CRLF
+                    break
+                body += self.rfile.read(size)
+                self.rfile.readline()  # consume the CRLF after the chunk
+                if len(body) > MAX_REQUEST_BYTES:
+                    raise ValueError("request body exceeds limit")
+            raw = bytes(body)
+        else:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > MAX_REQUEST_BYTES:
+                raise ValueError("invalid Content-Length")
+            raw = self.rfile.read(length)
+
+        if "gzip" in (self.headers.get("Content-Encoding") or "").lower():
+            raw = gzip.decompress(raw)
+        return raw
+
     def _json_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0 or length > MAX_REQUEST_BYTES:
-            raise ValueError("invalid Content-Length")
-        payload = json.loads(self.rfile.read(length))
+        payload = json.loads(self._read_raw_body())
         if not isinstance(payload, dict):
             raise ValueError("JSON body must be an object")
         return payload

@@ -132,3 +132,85 @@ def test_otlp_is_loopback_ingestable_but_execution_windows_require_coordinator(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def _traces_payload() -> dict:
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": "claude-code"}}
+                ]},
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": "a" * 32,
+                                "spanId": "b" * 16,
+                                "parentSpanId": "",
+                                "name": "claude_code.llm_request",
+                                "startTimeUnixNano": 1,
+                                "endTimeUnixNano": 2,
+                                "status": {"code": "STATUS_CODE_OK"},
+                                "attributes": [],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def _spawn(tmp_path: Path):
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    server = ObservabilityHTTPServer(("127.0.0.1", 0), store, coordinator_token=TOKEN)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return store, server, server.server_address[1]
+
+
+def test_otlp_accepts_chunked_body(tmp_path: Path) -> None:
+    """The real OpenTelemetry HTTP exporter streams a chunked body (no
+    Content-Length). The receiver must ingest it, not reject it with 400."""
+    store, server, port = _spawn(tmp_path)
+    try:
+        connection = HTTPConnection("127.0.0.1", port, timeout=5)
+        body_bytes = json.dumps(_traces_payload()).encode("utf-8")
+
+        def chunks():
+            yield body_bytes  # iterable body + no Content-Length -> chunked encoding
+
+        connection.request(
+            "POST", "/v1/traces", body=chunks(),
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        status = response.status
+        payload = json.loads(response.read())
+        connection.close()
+        assert status == 200, payload
+        assert payload.get("inserted", 0) >= 1
+    finally:
+        server.shutdown()
+
+
+def test_otlp_accepts_gzip_body(tmp_path: Path) -> None:
+    import gzip as _gzip
+
+    store, server, port = _spawn(tmp_path)
+    try:
+        raw = _gzip.compress(json.dumps(_traces_payload()).encode("utf-8"))
+        connection = HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request(
+            "POST", "/v1/traces", body=raw,
+            headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+        )
+        response = connection.getresponse()
+        status = response.status
+        payload = json.loads(response.read())
+        connection.close()
+        assert status == 200, payload
+        assert payload.get("inserted", 0) >= 1
+    finally:
+        server.shutdown()
