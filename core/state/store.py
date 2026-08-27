@@ -572,6 +572,48 @@ class LoopStateStore:
         record["payload"] = json.loads(record["payload"])
         return record
 
+    def list_outbox(
+        self, *, status: str | None = None, action_type: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List outbox intents (oldest first), optionally filtered by status/action.
+
+        Lets a worker drain pending work the scheduler enqueued, keeping agent
+        invocation out of the cron path (PRD §16 "Cron 只负责入队").
+        """
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if action_type is not None:
+            clauses.append("action_type = ?")
+            params.append(action_type)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._tx() as connection:
+            rows = connection.execute(
+                "SELECT * FROM outbox" + where + " ORDER BY created_at ASC, rowid ASC",
+                params,
+            ).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            record["payload"] = json.loads(record["payload"])
+            records.append(record)
+        return records
+
+    def reset_cursor(self, source_id: str) -> None:
+        """Drop a source's incremental cursor so the next scan reads from the start.
+
+        Used by the daily full-sweep job to re-examine chronic/long-tail anomalies
+        that an incremental cursor would skip.
+        """
+
+        with self._tx() as connection:
+            connection.execute(
+                "DELETE FROM source_cursors WHERE source_id = ?", (source_id,)
+            )
+
     @staticmethod
     def operation_key(
         *, run_id: str, cycle: int, stage: str, input_digest: str, component_version: str
