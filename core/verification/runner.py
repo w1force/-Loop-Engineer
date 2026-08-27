@@ -117,6 +117,77 @@ def workspace_digest(root: str | Path, ignore: tuple[str, ...] = ()) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _cheap_fingerprint(workspace: Path, ignore: tuple[str, ...]) -> str:
+    """A cheap, content-aware "has this tree changed?" fingerprint.
+
+    Used ONLY to decide whether a previously-computed ``workspace_digest`` can be
+    reused. It never replaces the digest (the manifest/sha256 contract must stay
+    byte-identical to ``release.github._git_tree_digest`` or release binding
+    breaks). Git worktrees use HEAD + porcelain (content-aware, no byte reads);
+    otherwise a stat sweep (mode/size/mtime/ino) avoids reading file bytes.
+    """
+
+    git_marker = workspace / ".git"
+    if git_marker.exists():
+        try:
+            import subprocess
+
+            def _git(*args: str) -> str:
+                proc = subprocess.run(
+                    ["git", "-C", str(workspace), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if proc.returncode != 0:
+                    raise OSError(proc.stderr.strip())
+                return proc.stdout
+            head = _git("rev-parse", "HEAD")
+            status = _git("status", "--porcelain", "--untracked-files=all")
+            return sha256(
+                ("git\0" + head + "\0" + status).encode("utf-8")
+            ).hexdigest()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # fall through to the stat sweep on any git failure
+    parts: list[str] = []
+    try:
+        for path in sorted(workspace.rglob("*"), key=lambda item: item.as_posix()):
+            relative = path.relative_to(workspace).as_posix()
+            if _ignored(relative, ignore):
+                continue
+            st = path.lstat()
+            parts.append(
+                f"{relative}\0{st.st_mode}\0{st.st_size}\0{st.st_mtime_ns}\0{st.st_ino}"
+            )
+    except OSError as exc:
+        raise WorkspaceDigestError(f"计算 workspace 指纹失败: {exc}") from exc
+    return sha256("stat\0".join(parts).encode("utf-8")).hexdigest()
+
+
+_READONLY_DIGEST_CACHE: dict[tuple[str, tuple[str, ...], str], str] = {}
+
+
+def readonly_workspace_digest(root: str | Path, ignore: tuple[str, ...] = ()) -> str:
+    """``workspace_digest`` for a workspace that has NO legitimate writer.
+
+    Returns the IDENTICAL value as ``workspace_digest`` but skips the full byte
+    re-read when a cheap content-aware fingerprint proves the tree is unchanged.
+    Only sound for read-only workspaces (the detached control worktree). MUST NOT
+    be used for tamper/mutation checks — sandbox before/after and
+    candidate-after-freeze require an unconditional re-hash.
+    """
+
+    workspace = Path(root).resolve()
+    fingerprint = _cheap_fingerprint(workspace, ignore)
+    key = (str(workspace), ignore, fingerprint)
+    cached = _READONLY_DIGEST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = workspace_digest(workspace, ignore)
+    _READONLY_DIGEST_CACHE[key] = digest
+    return digest
+
+
 def _copy_ignore(source: Path, patterns: tuple[str, ...]):
     def ignore(directory: str, names: list[str]) -> set[str]:
         current = Path(directory)
@@ -611,4 +682,5 @@ __all__ = [
     "command_contract_digest",
     "workspace_digest",
     "workspace_manifest",
+    "readonly_workspace_digest",
 ]

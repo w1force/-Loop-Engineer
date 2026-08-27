@@ -27,7 +27,7 @@ from .models import (
     ReplayEvidenceManifest,
     VerificationVerdict,
 )
-from .runner import workspace_digest
+from .runner import readonly_workspace_digest, workspace_digest
 from .replay import DockerReplayLauncher
 from .store import AttestedJsonEvidenceStore
 from .workflow import (
@@ -845,7 +845,10 @@ class VerificationCoordinator:
         return state.model_copy(update={"cycles": (*state.cycles[:-1], record)})
 
     def _assert_control_unchanged(self, workspace: Path, expected: str) -> None:
-        actual = workspace_digest(
+        # control is the detached, read-only baseline worktree — safe to serve from
+        # the fingerprint-guarded cache instead of re-walking every assert. Any real
+        # change flips the fingerprint and forces a full re-hash (fail-closed).
+        actual = readonly_workspace_digest(
             workspace, self.plan_freezer.policy.workspace_ignore
         )
         if actual != expected:
