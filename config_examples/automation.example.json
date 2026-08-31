@@ -1,0 +1,25 @@
+{
+  "state_db": ".loop-engineer/state.db",
+  "incremental_interval_seconds": 300,
+  "daily_full_at": "03:17",
+  "worker_interval_seconds": 60,
+  "incremental_jitter_seconds": 20,
+  "sources": [
+    {
+      "service": "ccb-agent",
+      "source_id": "ccb-agent-runlog",
+      "log_path": "FILL_ME/logs/run.jsonl",
+      "control_ref": "FILL_ME_base_sha_or_ref",
+      "control_workspace": "FILL_ME/checkouts/control",
+      "candidate_workspace_root": ".loop-engineer/worktrees",
+      "reviewers": ["your-github-handle"],
+      "suppression_seconds": 3600,
+      "full_rescan": true
+    },
+    {
+      "service": "example-unconfigured",
+      "source_id": "example-unconfigured",
+      "_comment": "no log_path/control_ref yet -> skipped by the scanner until filled in"
+    }
+  ]
+}

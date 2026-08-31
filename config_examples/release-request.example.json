@@ -1,0 +1,28 @@
+{
+  "app_id": "claude-code-best",
+  "repository_path": "/Users/wangzheng.440/claude-code",
+  "verification_run_id": "CONFIGURE_RUN_ID",
+  "verification_cycle": 1,
+  "verification_incident_id": "CONFIGURE_INCIDENT_ID",
+  "verification_incident_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "verification_plan_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "verification_replay_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "verification_replay_manifest": {
+    "schema_version": "verification-replay-evidence-manifest/v1",
+    "windows": [
+      {"scenario_id":"ccb-regression:incident-reproducer","variant":"control","input_digest":"a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f","collection_id":"CONFIGURE_CONTROL_COLLECTION_ID","otlp_barrier_digest":"0000000000000000000000000000000000000000000000000000000000000000","oracle_digest":"33439f49b86d29ac4ba0162364697d2c95d93de410a065219dc726791ae9af9c","result_sha256":"0000000000000000000000000000000000000000000000000000000000000000"},
+      {"scenario_id":"ccb-regression:incident-reproducer","variant":"candidate","input_digest":"a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f","collection_id":"CONFIGURE_CANDIDATE_COLLECTION_ID","otlp_barrier_digest":"0000000000000000000000000000000000000000000000000000000000000000","oracle_digest":"33439f49b86d29ac4ba0162364697d2c95d93de410a065219dc726791ae9af9c","result_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
+    ]
+  },
+  "verification_scenario_input_digests": {
+    "ccb-regression:incident-reproducer": "a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f"
+  },
+  "problem_slug": "configure-problem-slug",
+  "branch_date": "2026-08-25",
+  "sequence": 1,
+  "title": "fix: CONFIGURE concise incident summary",
+  "body": "Business value: CONFIGURE\n\nRisk: CONFIGURE\n\nVerification evidence: CONFIGURE",
+  "commit_message": "fix: CONFIGURE concise incident summary",
+  "changed_files": ["CONFIGURE_CHANGED_FILE"],
+  "draft": false
+}

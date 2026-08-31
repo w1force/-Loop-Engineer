@@ -1,12 +1,14 @@
 """Task 4: build_agent_state + build_system_prompt 测试。
 
-Task 4 退役 prepare_skills 后,skill 注入逻辑分两段:
+Task 4 退役 prepare_skills 后,skill 注入逻辑分三段:
 - build_agent_state(config):scan skills + 新建 FileStateCache + 设 cwd + 迁移 initial_messages
-- build_system_prompt(agent_state, config):config.system + skill 目录(从 agent_state.skills)
+- build_system_prompt(agent_state, config):只追加环境与按需加载说明
+- inject_skill_listing(agent_state):在对话阶段仅注入 name/description
 """
 from pathlib import Path
 
 from core.agent_loop import AgentConfig, build_agent_state, build_system_prompt
+from core.loop.phases.skill_listing import inject_skill_listing
 from core.types import AgentState, SkillMeta, UserMessage
 
 
@@ -77,7 +79,11 @@ def test_build_system_prompt_str():
     astate = AgentState(skills=[m])
     cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
     out = build_system_prompt(astate, cfg)
-    assert isinstance(out, str) and out.startswith("base") and "<skills>" in out and "foo" in out
+    assert isinstance(out, str) and out.startswith("base")
+    assert "Load_Skill" in out
+    assert "<skills>" not in out and "foo: d" not in out
+    inject_skill_listing(astate)
+    assert "- foo: d" in str(astate.messages[-1].content)
 
 
 def test_build_system_prompt_list():
@@ -88,7 +94,10 @@ def test_build_system_prompt_list():
     )
     out = build_system_prompt(astate, cfg)
     assert isinstance(out, list) and out[0] == {"type": "text", "text": "a"}
-    assert "<skills>" in out[-1]["text"]
+    assert "Load_Skill" in out[-1]["text"]
+    assert "foo: d" not in out[-1]["text"]
+    inject_skill_listing(astate)
+    assert "- foo: d" in str(astate.messages[-1].content)
 
 
 def test_build_system_prompt_list_includes_agent_cwd():
@@ -112,7 +121,7 @@ def test_build_system_prompt_empty_skills_list_passthrough():
     assert "<system-reminder>" in out[-1]["text"]
 
 
-def test_build_system_prompt_description_whitespace_collapsed():
+def test_skill_listing_description_whitespace_collapsed():
     """description 多行空白压缩成单行。"""
     m = SkillMeta(
         name="foo",
@@ -121,6 +130,5 @@ def test_build_system_prompt_description_whitespace_collapsed():
         skill_md=Path("/x/SKILL.md"),
     )
     astate = AgentState(skills=[m])
-    cfg = AgentConfig(provider=_NoopProvider(), system="base", model="m", max_tokens=100)
-    out = build_system_prompt(astate, cfg)
-    assert "line one line two" in out
+    inject_skill_listing(astate)
+    assert "line one line two" in str(astate.messages[-1].content)

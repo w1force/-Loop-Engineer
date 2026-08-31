@@ -1,0 +1,34 @@
+{
+  "run_id": "CONFIGURE_RUN_ID",
+  "cycle": 1,
+  "scenario_id": "ccb-regression:incident-reproducer",
+  "variant": "candidate",
+  "input_digest": "a0bf301b256eec65cb15ca6c6723f9f5cc107282f442bc784886739eb1fdd53f",
+  "input_payload": {
+    "prompt": "CONFIGURE_NORMALIZED_REPRODUCER_INPUT"
+  },
+  "collection_id": "CONFIGURE_CANDIDATE_COLLECTION_ID",
+  "control_ref": "CONFIGURE_CONTROL_COMMIT_SHA",
+  "control_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "candidate_ref": "CONFIGURE_CANDIDATE_REF",
+  "candidate_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "skill_digests": {
+    "ccb-regression": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "started_at_ns": 0,
+  "ended_at_ns": 1,
+  "collection_complete": true,
+  "trace_id": null,
+  "request_id": null,
+  "session_id": "CONFIGURE_CCB_SESSION_ID",
+  "finished": true,
+  "outcome": "success",
+  "payload": {
+    "status": "ok"
+  },
+  "model": "CONFIGURE_ACTUAL_CCB_MODEL",
+  "tool_calls": [],
+  "oracle_digest": "33439f49b86d29ac4ba0162364697d2c95d93de410a065219dc726791ae9af9c",
+  "result_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

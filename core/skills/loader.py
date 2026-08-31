@@ -17,23 +17,37 @@ import yaml
 from ..types import SkillMeta
 
 logger = logging.getLogger(__name__)
+MAX_FRONTMATTER_BYTES = 128 * 1024
 
 
 def _parse_frontmatter(skill_md: Path) -> dict:
     """解析 SKILL.md 的 YAML frontmatter。
     无 frontmatter / 无闭合 --- / YAML 损坏 / 非 dict → 返回 {}。"""
-    text = skill_md.read_text(encoding="utf-8")
-    if not text.startswith("---"):
+    collected = bytearray()
+    try:
+        with skill_md.open("rb") as handle:
+            first = handle.readline(MAX_FRONTMATTER_BYTES + 1)
+            if first.rstrip(b"\r\n") != b"---":
+                return {}
+            collected.extend(first)
+            while len(collected) <= MAX_FRONTMATTER_BYTES:
+                line = handle.readline(MAX_FRONTMATTER_BYTES - len(collected) + 1)
+                if not line:
+                    return {}
+                collected.extend(line)
+                if line.rstrip(b"\r\n") == b"---":
+                    break
+    except OSError:
         return {}
-    lines = text.splitlines()
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end is None:
+    if len(collected) > MAX_FRONTMATTER_BYTES:
         return {}
-    fm_text = "\n".join(lines[1:end])
+    try:
+        lines = bytes(collected).decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return {}
+    if len(lines) < 3 or lines[-1].strip() != "---":
+        return {}
+    fm_text = "\n".join(lines[1:-1])
     try:
         meta = yaml.safe_load(fm_text)
     except yaml.YAMLError:

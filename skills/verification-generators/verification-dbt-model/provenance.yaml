@@ -1,0 +1,105 @@
+schema_version: "1"
+name: verification-dbt-model
+upstream:
+  repository: https://github.com/dbt-labs/dbt-agent-skills
+  commit: 4cd91ac52ab117a45b7518baaea48ba69a0194dc
+  source_path: skills/dbt/skills/adding-dbt-unit-test
+  license: Apache-2.0
+vendored:
+  - source_path: LICENSE
+    destination_path: LICENSE.upstream
+    sha256: a25c0f444db00399e225e96559b376d92188fbab622b50c5d4db7c556f77daff
+    modifications:
+      - Vendored verbatim from the fixed upstream commit.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/SKILL.md
+    destination_path: references/upstream/adding-dbt-unit-test/SKILL.md
+    sha256: b185a1ead7471bd128ef8892ffc39a4d31dcfd1053fcb81dc6955f4e7ca2778e
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/spec.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/spec.md
+    sha256: 8d3a4f9895d988a8eef262f44669b9e520b0299c44e9b58e4acc91bd2ab787f9
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/examples.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/examples.md
+    sha256: eeb3a31ba2224d611d4c29a3f3ac7907808fa0e6969d5c2186092529920219e1
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/special-cases-incremental-model.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/special-cases-incremental-model.md
+    sha256: 9264d0bef874c77b7fc19a7e1406409f24f693bbd6e3e479bbe19839c9747509
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/special-cases-ephemeral-dependency.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/special-cases-ephemeral-dependency.md
+    sha256: 9333220abbe0efe146631405a380fd1b2a98c972527df4151fa178d253e3a41e
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/special-cases-special-case-overrides.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/special-cases-special-case-overrides.md
+    sha256: 8f90954286cbe1c5ab105137255000aeea641413ed1f23324abb874fcae82137
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/special-cases-versioned-model.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/special-cases-versioned-model.md
+    sha256: 1a88625d7a9166881e945125ea6f7b1b3963bb5e9f3e1efbf1d9d996d2e34005
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-bigquery-caveats.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-bigquery-caveats.md
+    sha256: c259e4400cda127e3e6ac1044e70e68b4f99fa179dc7f22ae1bddef6112cd16c
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-bigquery-data-types.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-bigquery-data-types.md
+    sha256: 7c605113880c1cb7febf4313c3cd44ecf6fed7fec22a9f580430029a53564326
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-postgres-data-types.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-postgres-data-types.md
+    sha256: be4f2f6c66b722baadc827fa81e4ca3f1ce3175cb002d2a8dfb33aeef5cdbba0
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-redshift-caveats.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-redshift-caveats.md
+    sha256: 5bec6b91712be0b93061982c9923acd6bda2eb02a67697fdc13cabffc3f948b1
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-redshift-data-types.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-redshift-data-types.md
+    sha256: 82669225e3de247388d56341ea66deaf436395ef2fff34911c79dceb93aa6138
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-snowflake-data-types.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-snowflake-data-types.md
+    sha256: d7eb96ce9710da807eab9e2e6c2667970c80c97681726e58176ac7b036d82ad2
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/warehouse-spark-data-types.md
+    destination_path: references/upstream/adding-dbt-unit-test/references/warehouse-spark-data-types.md
+    sha256: 293587b72bb78c366d798e261373c22025b5db6b319932ac8e0dbb9a62b749c7
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/SKILL.md
+    destination_path: SKILL.md
+    sha256: d051eda54cfde6ceb6c5bf463eb3d62f9ac48f6ebc46c12d32b4bbb91f060f45
+    modifications:
+      - Reframed as an isolated, frozen dbt verification-test generator.
+      - Bound generated manifests to the incident, snapshots, policy, and generation Skill.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/examples.md
+    destination_path: references/generation-workflow.md
+    sha256: 77ac46b21337bb10e6d1494c6c1fa681dcab41fa7e7a09e201103b088370fc57
+    modifications:
+      - Added diff-derived boundaries and independently grounded expected-value oracles.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/spec.md
+    destination_path: references/execution-contract.md
+    sha256: 83c6690751bec319a337e7c741d57872a2ee5ccdff8aa645df7aad93395c10f8
+    modifications:
+      - Added exact selection, structured result, disposable target, and verified cleanup requirements.
+      - Prohibited warning-only companion tests from passing the verification gate.
+  - source_path: skills/dbt/skills/adding-dbt-unit-test/references/special-cases-incremental-model.md
+    destination_path: references/dbt-compatibility.md
+    sha256: 02794f7643cd0a327b4b4d988a7e7bb5aeaf0cb9bd352cee263a5b4f6352c437
+    modifications:
+      - Combined special cases and adapter limitations with frozen version and environment rules.

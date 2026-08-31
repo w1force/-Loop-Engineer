@@ -82,6 +82,20 @@ def test_scan_multiline_description(tmp_path):
     assert "line one" in desc and "line two" in desc
 
 
+def test_scan_does_not_read_or_decode_skill_body(tmp_path):
+    skills = tmp_path / "skills"
+    directory = skills / "foo"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_bytes(
+        b"---\ndescription: metadata only\n---\n\xff\xfeprivate body"
+    )
+
+    metas = SkillLoader.scan([skills])
+
+    assert len(metas) == 1
+    assert metas[0].description == "metadata only"
+
+
 # --- render_catalog / append_catalog 已在 agent_state Task 1 删除(逻辑移到 Task 4
 # --- 的 build_system_prompt),相关测试一并下线。prepare_skills 注入行为由
 # --- tests/test_agent_loop_skill.py 覆盖(临时内联私有 helper 维持现有行为)。

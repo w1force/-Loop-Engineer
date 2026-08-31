@@ -1,0 +1,74 @@
+schema_version: "1"
+name: verification-ui-playwright
+upstream:
+  repository: https://github.com/microsoft/playwright-cli.git
+  commit: 60cb176373cf4400405122703e6de26cd58c7a1c
+  source_path: skills/playwright-cli
+  license: Apache-2.0
+vendored:
+  - source_path: LICENSE
+    destination_path: LICENSE.upstream
+    sha256: c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b
+    modifications:
+      - Normalized CRLF to LF while vendoring; license text is otherwise unchanged.
+  - source_path: skills/playwright-cli/SKILL.md
+    destination_path: references/upstream/playwright-cli/SKILL.md
+    sha256: 29c0b669a524d42b51934d7db9144c1c07a566d0549ae6fb6ccd810e5a3cf61b
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/playwright-cli/references/test-generation.md
+    destination_path: references/upstream/playwright-cli/references/test-generation.md
+    sha256: 12f54cfa718d9e559bad918120a4ca4f11c933167713d1b9c5f99872eddaf749
+    modifications:
+      - Vendored verbatim; its heal guidance is prohibited by trusted-generation.md.
+  - source_path: skills/playwright-cli/references/playwright-tests.md
+    destination_path: references/upstream/playwright-cli/references/playwright-tests.md
+    sha256: c5b0719fef2cfdff50bd744051b2f9afc119775db4b48e9b2882c1cf3886797c
+    modifications:
+      - Vendored verbatim as debugging-mechanics source material.
+  - source_path: skills/playwright-cli/references/request-mocking.md
+    destination_path: references/upstream/playwright-cli/references/request-mocking.md
+    sha256: 54e801c9663fc2b6d68ceb058cb1c360724c2499f42acc7852a68e83e5b5f37c
+    modifications:
+      - Vendored verbatim as network-mocking source material.
+  - source_path: skills/playwright-cli/references/session-management.md
+    destination_path: references/upstream/playwright-cli/references/session-management.md
+    sha256: cd3e261b8763bf952f1e371b876cb78d054379afec85482f9250633e1b7e6c44
+    modifications:
+      - Vendored verbatim as session-isolation and cleanup source material.
+  - source_path: skills/playwright-cli/references/storage-state.md
+    destination_path: references/upstream/playwright-cli/references/storage-state.md
+    sha256: 9ac47f9ae4a1aedcd2077f8ac9ab1ba6bee1962cb83ff51adcd36fb6d83b5ec6
+    modifications:
+      - Vendored verbatim as browser-state source material.
+  - source_path: skills/playwright-cli/references/tracing.md
+    destination_path: references/upstream/playwright-cli/references/tracing.md
+    sha256: 792e0ac7705e56ac48df84c0f5400221ce86107897c671590a64a4ea6a82508e
+    modifications:
+      - Vendored verbatim as evidence-capture source material.
+  - source_path: skills/playwright-cli/references/running-code.md
+    destination_path: references/upstream/playwright-cli/references/running-code.md
+    sha256: d95c539a5990b71d02d8bdf1d9414df16191eb6cff95b0063820518b7a13dcb2
+    modifications:
+      - Vendored verbatim as advanced Playwright source material.
+  - source_path: skills/playwright-cli/references/video-recording.md
+    destination_path: references/upstream/playwright-cli/references/video-recording.md
+    sha256: 8555ab5400df0d90e66318aacc0a8a4418fbf872e7463824d55d5c41615abd83
+    modifications:
+      - Vendored verbatim as secondary-evidence source material.
+  - source_path: skills/playwright-cli/references/element-attributes.md
+    destination_path: references/upstream/playwright-cli/references/element-attributes.md
+    sha256: bf19aa4671e0a50a0fefa9c790f39124e803060eefe395042b723c29fcb7faa2
+    modifications:
+      - Vendored verbatim as locator-discovery source material.
+  - source_path: skills/playwright-cli/SKILL.md
+    destination_path: SKILL.md
+    sha256: bcc62d26444746b681c76fe0a24f962737a8fbc2dfdd48dacf10623ff8cf020f
+    modifications:
+      - Reframed as a candidate-external Playwright verification test generator.
+      - Removed healing authority and added independent oracle, determinism, and freeze requirements.
+  - source_path: skills/playwright-cli/references/test-generation.md
+    destination_path: references/trusted-generation.md
+    sha256: 2c981b78c3e922963e7063069266422a785f135141adc12ffea9bc316e871c56
+    modifications:
+      - Added immutable input binding, structured evidence, secret handling, and fail-closed cleanup receipts.

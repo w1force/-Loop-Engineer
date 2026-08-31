@@ -20,7 +20,6 @@ import os
 from typing import Callable, Literal, Protocol
 import traceback
 
-from core.registry import get_tools
 from core.lsp import create_lsp_server_manager, default_lsp_server_configs
 from core.lsp.diagnostic_registry import reset_all_lsp_diagnostic_state
 from core.registry import assemble_tool_pool, get_tools
@@ -72,7 +71,9 @@ class AgentConfig:
     max_budget_usd: float | None = None
     transcript_path: str = "transcript.jsonl"
     tool_execution_mode: Literal["streaming", "batch"] = "streaming"
-    skill_dirs: list[str] = field(default_factory=lambda: ["skills/"])
+    skill_dirs: list[str] = field(
+        default_factory=lambda: ["skills/", "skills/verification-generators/"]
+    )
     cwd: str = field(default_factory=os.getcwd)   # ★ Task 4 新增
     mcp_manager: ToolProvider | None = None
     verification_agent_enabled: bool = False
@@ -213,6 +214,10 @@ async def submit(
     故本函数对 AssistantMessage 不再 append(否则重复)。
     Task 4: system 用 build_system_prompt(替 prepare_skills);
     budget 累积到 agent_state.total_*_tokens(跨 submit 持久)。
+
+    注:事故修复工作流(诊断→修复→验证→发布)不再经过 submit()。它由
+    core.orchestrator.loop_engineer.LoopEngineer 独立驱动;submit() 回归为纯粹的
+    通用 Agent 会话执行内核(Repair 阶段正是复用这一内核)。
     """
     agent_state.messages.append(UserMessage(content=prompt))   # ★ 跨 submit 累积
     await record_transcript(agent_state.messages, config.transcript_path)  # 红线#5

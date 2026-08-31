@@ -22,6 +22,17 @@ async def test_read_adds_line_numbers(tmp_path):
     assert "2" in result and "line2" in result
 
 
+async def test_read_resolves_relative_path_from_agent_cwd(tmp_path):
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    (workspace / "relative.txt").write_text("candidate data\n")
+    agent_state = AgentState(cwd=str(workspace))
+
+    result = await READ_TOOL.func(ReadInput(file_path="relative.txt"), _ctx(agent_state))
+
+    assert "candidate data" in result
+
+
 async def test_read_offset_limit(tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("l1\nl2\nl3\nl4\nl5\n")

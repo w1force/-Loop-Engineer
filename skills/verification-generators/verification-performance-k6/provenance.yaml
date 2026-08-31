@@ -1,0 +1,80 @@
+schema_version: "1"
+name: verification-performance-k6
+upstream:
+  repository: https://github.com/grafana/skills
+  commit: 51d33e71e191b409bbd25fc7be2684c610d18166
+  source_path: skills/grafana-k6/k6-perf-test-website
+  license: Apache-2.0
+vendored:
+  - source_path: LICENSE
+    destination_path: LICENSE.upstream
+    sha256: efb4d91baa7cd9559d3452f79deb2b3d9dc819c83d7058a1f90ac70484a1a23e
+    modifications:
+      - Vendored verbatim from the fixed upstream commit.
+  - source_path: skills/grafana-k6/k6-perf-test-website/SKILL.md
+    destination_path: references/upstream/k6-perf-test-website/SKILL.md
+    sha256: 3fa52f3e32dafda884614b76e4359a34e8db7099aaa58e383067ee881cc6bf0b
+    modifications:
+      - Vendored verbatim as non-authoritative source material.
+  - source_path: skills/grafana-k6/k6-perf-test-website/references/workflow-elicitation.md
+    destination_path: references/upstream/k6-perf-test-website/references/workflow-elicitation.md
+    sha256: d5a3b33cfd01b6033387372dfed60362667365716ab898b832cbdbb8cc3702d6
+    modifications:
+      - Vendored verbatim as source material.
+  - source_path: skills/grafana-k6/k6-perf-test-website/references/functional-tests.md
+    destination_path: references/upstream/k6-perf-test-website/references/functional-tests.md
+    sha256: ed7bf003bfff9a7a7b767eedf4d77ff76c210b8b5acc3a4d9b110c8ce8995aa7
+    modifications:
+      - Vendored verbatim as source material.
+  - source_path: skills/grafana-k6/k6-perf-test-website/references/slo-design.md
+    destination_path: references/upstream/k6-perf-test-website/references/slo-design.md
+    sha256: 2cefd8a08ea6984fa7a89db892f9dde9f14d853e7fdbeb5cd132ead6070d43a4
+    modifications:
+      - Vendored verbatim as source material.
+  - source_path: skills/grafana-k6/k6-perf-test-website/references/gotchas.md
+    destination_path: references/upstream/k6-perf-test-website/references/gotchas.md
+    sha256: 6e49fe87b0a513c58322df5693db65d58e9f74b73dcfb86ec06b07740fd7fe52
+    modifications:
+      - Vendored verbatim as source material.
+  - source_path: skills/grafana-k6/k6-perf-test-website/assets/recordings/scripts/recorder.template.js
+    destination_path: references/upstream/k6-perf-test-website/assets/recordings/scripts/recorder.template.js
+    sha256: ba704f01164696f48f5e0ea476fd0f8679747c278b37d5d6724bd7dc2a23e652
+    modifications:
+      - Vendored verbatim as an unsafe-by-default source template; local rules prohibit raw HAR retention.
+  - source_path: skills/grafana-k6/k6-perf-test-website/assets/tests/run-all.sh
+    destination_path: references/upstream/k6-perf-test-website/assets/tests/run-all.sh
+    sha256: 88f189e0e4dd3b38bd681cf12fd2f40b389590a28a23973f6f3526c6735230ff
+    modifications:
+      - Vendored verbatim as source material; local rules replace its empty-suite success behavior.
+  - source_path: skills/grafana-k6/k6-perf-test-website/assets/tools/run-with-monitor.sh
+    destination_path: references/upstream/k6-perf-test-website/assets/tools/run-with-monitor.sh
+    sha256: f577ca1f18b2e2e2f3f79b793d08618118da24c386315535da47671f0db4cab4
+    modifications:
+      - Vendored verbatim as source material; local rules map saturation to BLOCKED.
+  - source_path: skills/grafana-k6/k6-perf-test-website/assets/package.json
+    destination_path: references/upstream/k6-perf-test-website/assets/package.json
+    sha256: cd8b1e8ad4b94a4a6462c229e164fdedad6787007cc8e5fe5c2bdfd5e2371c9f
+    modifications:
+      - Vendored verbatim as dependency-source material.
+  - source_path: skills/grafana-k6/k6-perf-test-website/SKILL.md
+    destination_path: SKILL.md
+    sha256: 4042b6782ad87e9075a69635e567acded566b1bcca3f385749b6395cafcce652
+    modifications:
+      - Reframed as a generator-only verification contract with candidate-external output.
+      - Restricted load targets to isolated local control/candidate environments and made missing reversible cleanup blocking.
+      - Bound generated manifests to the incident, snapshots, policy, and generation Skill.
+  - source_path: skills/grafana-k6/k6-perf-test-website/references/workflow-elicitation.md
+    destination_path: references/generation-workflow.md
+    sha256: 9485d5fc0f8d8d4e839d47bc2e463052df6b5698f3fc266784793594a0972606
+    modifications:
+      - Added immutable SLO, deterministic seed, isolated fixture, cleanup, and no-silent-skip requirements.
+  - source_path: skills/grafana-k6/k6-perf-test-website/references/slo-design.md
+    destination_path: references/evidence-contract.md
+    sha256: b1d9f6c5daaf701e2a4606dfa8154d7b8878d7df70106a4b4acf79c1f2cfc2e5
+    modifications:
+      - Converted threshold guidance into a structured fail-closed evidence contract.
+  - source_path: skills/grafana-k6/k6-perf-test-website/assets/recordings/scripts/recorder.template.js
+    destination_path: scripts/sanitize_har.py
+    sha256: 20deecd5d7c1d2b08664fafb35a8318663086987c2acdf93be6ece791f4eb9e3
+    modifications:
+      - Replaced raw-HAR retention with deterministic body and credential redaction plus digest reporting.

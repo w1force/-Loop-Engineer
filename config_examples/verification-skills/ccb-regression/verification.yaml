@@ -1,0 +1,34 @@
+name: ccb-regression
+version: "1"
+description: Focused CCB incident reproducer template
+integration:
+  - id: incident-reproducer
+    description: Reproduce the diagnosed failure with a committed focused test
+    steps:
+      - id: focused-test
+        argv:
+          - bun
+          - test
+          - CONFIGURE_COMMITTED_REPRODUCER_TEST_PATH
+        timeout_ms: 300000
+        expected_exit_code: 0
+        assertion_categories:
+          - regression
+      - id: boundary-test
+        argv:
+          - bun
+          - test
+          - CONFIGURE_COMMITTED_BOUNDARY_TEST_PATH
+        timeout_ms: 300000
+        expected_exit_code: 0
+        assertion_categories:
+          - boundary
+      - id: side-effect-test
+        argv:
+          - bun
+          - test
+          - CONFIGURE_COMMITTED_SIDE_EFFECT_TEST_PATH
+        timeout_ms: 300000
+        expected_exit_code: 0
+        assertion_categories:
+          - side_effect

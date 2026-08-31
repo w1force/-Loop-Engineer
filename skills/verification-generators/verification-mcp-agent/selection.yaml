@@ -1,0 +1,79 @@
+name: verification-mcp-agent
+scenarios:
+  - id: mcp-client-contract
+    when:
+      matched_rules:
+        - mcp-client-contract
+        - mcp-tool-regression
+      changed_paths:
+        - "**/mcp/**"
+        - "**/*mcp*"
+        - "**/tool*/**"
+      risk_tags:
+        - mcp
+        - tool-discovery
+        - tool-invocation
+        - schema-validation
+    selection_prompt: >-
+      Generate a deterministic MCP-client contract suite using both a scripted
+      mock model and a scripted mock MCP server. Cover initialization and
+      capability negotiation, initialized notification, tools/list schema,
+      tools/call argument preservation, successful content, tool-declared errors,
+      unknown tools and methods, missing or invalid arguments, malformed protocol
+      messages, and exact structured transcript assertions.
+    exclusions:
+      - Standalone MCP server business-logic unit tests with no Agent client path.
+      - Tests that depend on a real model deciding whether to call a tool.
+      - Prompts whose expected outcome is inferred from candidate behavior.
+  - id: mcp-resilience
+    when:
+      matched_rules:
+        - mcp-timeout
+        - mcp-reconnect
+        - mcp-process-lifecycle
+      changed_paths:
+        - "**/mcp/**"
+        - "**/*transport*"
+        - "**/*timeout*"
+        - "**/*retry*"
+      risk_tags:
+        - timeout
+        - cancellation
+        - retry
+        - reconnect
+        - process-lifecycle
+    selection_prompt: >-
+      Generate deterministic failure and recovery cases for MCP request timeout,
+      client cancellation, server exit, reconnect, retry limits and idempotency.
+      Use virtual or bounded time, fixed request identifiers and scripted event
+      order. Assert retry counts, cancellation propagation, duplicate side-effect
+      prevention, cleanup and the terminal structured result.
+    exclusions:
+      - Unbounded soak, load or performance tests.
+      - Retry tests without an explicit trusted retry policy.
+      - Scenarios that use wall-clock sleeps as their oracle.
+  - id: mcp-stdio-integrity
+    when:
+      matched_rules:
+        - mcp-stdio-protocol
+        - mcp-logging-regression
+      changed_paths:
+        - "**/mcp/**"
+        - "**/*stdio*"
+        - "**/*logger*"
+        - "**/*protocol*"
+      risk_tags:
+        - stdio
+        - framing
+        - protocol-noise
+        - serialization
+    selection_prompt: >-
+      Generate byte-aware stdio protocol cases that separate stdout from stderr,
+      reject non-JSON protocol noise, verify one complete JSON-RPC message per
+      frame, exercise split and coalesced input, preserve Unicode and large
+      arguments, and assert that diagnostic logs never corrupt the protocol
+      channel.
+    exclusions:
+      - HTTP-only or SSE-only MCP transports.
+      - Visual terminal rendering checks.
+      - Text-only PASS or FAIL reports without captured protocol records.
