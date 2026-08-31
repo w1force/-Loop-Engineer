@@ -1,19 +1,7 @@
 # Loop Engineer
 
-Loop Engineer 是一个面向 Coding Agent 故障修复的本地生产仿真控制面，旨在将结构化日志发现、独立上下文诊断与修复、Git Worktree 隔离、Docker 基线/候选对照、机器门禁、GitHub Pull Request 和 Repair Skill 沉淀串联为可审计流程。
-
-> 当前阶段：工程原型。通用 Agent、Discovery、Diagnosis、Repair、Verification、Release 和 Learning 的核心组件均已有实现；默认 Automation 尚未装配完整 `LoopEngineer`，仓库也没有提供可一键运行的业务 Docker Harness 或真实 Docker + OTLP + GitHub 联合 E2E。项目不会自动合并、部署或回滚代码。
-
-## 为什么需要 Loop Engineer
-
-普通 Coding Agent 可以生成补丁和测试报告，但“Agent 认为自己修好了”不能作为发布依据。Loop Engineer 将修复过程拆成相互制约的角色与机器控制面：
-
-- LLM 负责提出诊断、补丁和验证方案，不直接签发最终结论；
-- control 与 candidate 使用相同输入进行对照，先证明基线确实能复现故障；
-- Host Oracle、验证引擎和发布控制器在宿主侧重算结果；
-- Incident、源码、镜像、Policy、Skill、输入、Replay 和报告通过摘要绑定；
-- 只有受信 Coordinator 计算出 `VERIFIED` 后，Release 才能创建 PR；
-- PR 合并、部署和生产发布始终留给外部 CI/CD 与人工审批。
+Loop Engineer 是一个面向 Agent服务 故障修复的本地生产仿真控制面，旨在将结构化日志发现、独立上下文诊断与修复、Git Worktree 隔离、Docker 基线/候选对照、机器门禁、GitHub Pull Request 和 Repair Skill 沉淀串联为可审计流程。
+实现从日志诊断到生产环境部署全流程闭环
 
 ## 系统架构
 
