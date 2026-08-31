@@ -13,12 +13,17 @@ import asyncio
 import json
 from pathlib import Path
 import re
+from typing import TYPE_CHECKING
 
 from pydantic import Field, ValidationError
 
 from core.agents.verification import (
     build_verification_can_use_tool,
-    select_verification_tools,
+)
+from core.agents.verification_workflow import _child_transcript
+from core.agents.workspace_guard import (
+    build_workspace_guard,
+    restricted_paths_for_workspace,
 )
 from core.contracts.base import Contract
 from core.contracts.diagnosis import DiagnosisProposal
@@ -42,6 +47,9 @@ from core.verification.workflow import (
     canonical_json_digest,
 )
 
+if TYPE_CHECKING:
+    from core.learning.catalog import LearnedSkillCatalog
+
 from .evidence import (
     DiagnosisEvidencePlanner,
     DiagnosisEvidenceRetriever,
@@ -51,6 +59,28 @@ from .evidence import (
 
 DIAGNOSIS_AGENT_TYPE = "diagnosis"
 _DEFAULT_DIAGNOSIS_SKILL = "skills/diagnosis/SKILL.md"
+DIAGNOSIS_TOOL_NAMES = frozenset({"Read", "Glob", "Grep", "Bash", "Load_Skill"})
+
+
+def _select_diagnosis_tools(tools):
+    selected = []
+    seen: set[str] = set()
+    for tool in tools:
+        if tool.name in DIAGNOSIS_TOOL_NAMES and tool.name not in seen:
+            selected.append(tool)
+            seen.add(tool.name)
+    return selected
+
+
+def _build_diagnosis_can_use_tool(parent_can_use_tool):
+    verification_policy = build_verification_can_use_tool(parent_can_use_tool)
+
+    async def can_use_tool(tool_call):
+        if tool_call.name == "Load_Skill":
+            return await parent_can_use_tool(tool_call)
+        return await verification_policy(tool_call)
+
+    return can_use_tool
 
 
 class DiagnosisError(RuntimeError):
@@ -91,7 +121,11 @@ class DiagnosisStage:
         evidence_retriever: DiagnosisEvidenceRetriever | None = None,
         evidence_plan_freezer: EvidencePlanFreezer | None = None,
         evidence_collection_complete: bool = False,
+        learned_skill_catalog: "LearnedSkillCatalog | None" = None,
+        learned_skill_limit: int = 3,
     ):
+        if learned_skill_limit < 1:
+            raise ValueError("learned_skill_limit must be positive")
         self.frozen_skill: FrozenStageSkill = freeze_stage_skill(skill_path)
         if evidence_store is not None:
             if evidence_planner is not None or evidence_retriever is not None:
@@ -108,6 +142,12 @@ class DiagnosisStage:
         self.evidence_retriever = evidence_retriever
         self.evidence_plan_freezer = evidence_plan_freezer or EvidencePlanFreezer()
         self.evidence_collection_complete = evidence_collection_complete
+        if learned_skill_catalog is None:
+            from core.learning.catalog import default_learned_skill_catalog
+
+            learned_skill_catalog = default_learned_skill_catalog()
+        self.learned_skill_catalog = learned_skill_catalog
+        self.learned_skill_limit = learned_skill_limit
 
     async def prepare_request(
         self,
@@ -170,17 +210,47 @@ class DiagnosisStage:
         parent_params,
         tracer,
         max_turns: int = 24,
+        attempt: int = 1,
     ) -> DiagnosisProposal:
         frozen = DiagnosisRequest.model_validate_json(request.model_dump_json())
         control = Path(frozen.control_workspace).resolve()
         if not control.is_dir():
             raise DiagnosisError("control workspace does not exist")
 
-        tools = select_verification_tools(parent_params.tools)  # Read/Glob/Grep/Bash
+        signal = frozen.primary_signal
+        learned_skills = (
+            self.learned_skill_catalog.skill_metas(
+                query={
+                    "matched_rule": frozen.matched_rule,
+                    "signature_code": (signal.error_code if signal else None),
+                    "error_type": (signal.error_type if signal else None),
+                    "event_code": (signal.error_code if signal else None),
+                    "message": (signal.message if signal else ""),
+                    "source_paths": (),
+                },
+                limit=self.learned_skill_limit,
+            )
+            if self.learned_skill_catalog is not None
+            else []
+        )
+        from core.learning.runtime import default_learning_archive_root
+
+        restricted_paths = restricted_paths_for_workspace(
+            control,
+            (
+                self.learned_skill_catalog.root,
+                default_learning_archive_root(),
+            ),
+        )
+        tools = _select_diagnosis_tools(parent_params.tools)
         missing = {"Read", "Glob", "Grep"} - {t.name for t in tools}
         if missing:
             raise DiagnosisError(
                 "diagnosis agent missing read-only tools: " + ", ".join(sorted(missing))
+            )
+        if learned_skills and "Load_Skill" not in {tool.name for tool in tools}:
+            raise DiagnosisError(
+                "diagnosis stage selected learned skills but Load_Skill is unavailable"
             )
 
         task_prompt = (
@@ -213,12 +283,31 @@ class DiagnosisStage:
             parent_agent_state=parent_agent_state,
             parent_params=parent_params,
             task_prompt=task_prompt,
-            tracer=tracer.child(agent_type=DIAGNOSIS_AGENT_TYPE, depth=1),
+            tracer=tracer.child(
+                agent_type=DIAGNOSIS_AGENT_TYPE,
+                stage="diagnosis",
+                incident_id=frozen.incident_id,
+                attempt=attempt,
+                depth=1,
+            ),
             context_mode="fresh",
-            system_override=build_stage_system_prompt(frozen=self.frozen_skill),
+            system_override=build_stage_system_prompt(
+                frozen=self.frozen_skill,
+                allow_learned_skills=bool(learned_skills),
+            ),
             tools_override=tools,
             cwd_override=str(control),
-            can_use_tool=build_verification_can_use_tool(parent_params.can_use_tool),
+            transcript_path=_child_transcript(
+                parent_params.transcript_path,
+                f"diagnosis-{frozen.incident_id}-{attempt}",
+            ),
+            skills_override=learned_skills,
+            can_use_tool=build_workspace_guard(
+                _build_diagnosis_can_use_tool(parent_params.can_use_tool),
+                workspace=control,
+                allowed_tool_names=DIAGNOSIS_TOOL_NAMES,
+                restricted_relative_paths=restricted_paths,
+            ),
             max_turns=max_turns,
             abort_signal=parent_params.abort_signal,
             propagate_errors=False,

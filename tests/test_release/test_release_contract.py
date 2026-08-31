@@ -461,7 +461,17 @@ def test_release_is_idempotent_after_push(
         candidate_digest=workspace_digest(repository, ignore),
         run_id="run-1",
         cycle=1,
+        incident_id="incident-1",
+        incident_digest="c" * 64,
     )
+    report.model_dump = lambda *, mode: {
+        "run_id": report.run_id,
+        "cycle": report.cycle,
+        "incident_id": report.incident_id,
+        "incident_digest": report.incident_digest,
+        "candidate_digest": report.candidate_digest,
+        "verdict": report.verdict.value,
+    }
     monkeypatch.setenv("LOOP_ENGINEER_VERIFICATION_SIGNING_KEY", "k" * 32)
     monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
@@ -488,6 +498,8 @@ def test_release_is_idempotent_after_push(
 
     assert first == second
     assert first.pull_request_number == 17
+    assert first.verification_incident_id == "incident-1"
+    assert first.candidate_digest == report.candidate_digest
     assert _git(repository, "rev-list", "--count", "main..HEAD") == "1"
     assert _git(repository, "ls-remote", "--heads", "origin", first.branch)
     assert not hook_marker.exists()

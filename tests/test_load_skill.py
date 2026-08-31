@@ -9,6 +9,7 @@ from core.builtin_tools.load_skill import LoadSkillInput, LOAD_SKILL_TOOL
 from core.skills import SkillLoader
 from core.tools import Tool, ToolContext
 from core.types import AgentState
+from core.types import SkillMeta
 from telemetry.tracer import NoopTracer
 
 
@@ -47,6 +48,26 @@ async def test_load_skill_read_failure(tmp_path):
     result = await LOAD_SKILL_TOOL.func(LoadSkillInput(name="foo"), _ctx(agent_state))
     assert isinstance(result, str)
     assert "error" in result.lower()
+
+
+async def test_load_skill_uses_frozen_snapshot_instead_of_live_file(tmp_path):
+    _make_skill(tmp_path, "learned-repair-timeout", "old live text")
+    path = tmp_path / "learned-repair-timeout" / "SKILL.md"
+    meta = SkillMeta(
+        name="learned-repair-timeout",
+        description="timeout repair",
+        skill_dir=path.parent,
+        skill_md=path,
+        snapshot_text="frozen text",
+        digest="a" * 64,
+    )
+    path.write_text("mutated text", encoding="utf-8")
+
+    result = await LOAD_SKILL_TOOL.func(
+        LoadSkillInput(name=meta.name), _ctx(AgentState(skills=[meta]))
+    )
+
+    assert result == "frozen text"
 
 
 def test_load_skill_is_concurrency_safe():

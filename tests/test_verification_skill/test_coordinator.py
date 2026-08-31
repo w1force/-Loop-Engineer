@@ -443,6 +443,19 @@ class _Release:
         return "https://github.com/example/repo/pull/1"
 
 
+class _LearningSink:
+    def __init__(self):
+        self.captures = []
+        self.receipts = []
+
+    async def capture_verified(self, **artifacts):
+        self.captures.append(artifacts)
+
+    async def bind_release(self, receipt):
+        self.receipts.append(receipt)
+        return "learning://pending"
+
+
 def _coordinator(tmp_path: Path):
     policy = _policy()
     loader = _skill_loader(tmp_path)
@@ -579,6 +592,49 @@ async def test_only_signed_verified_report_can_reach_release(tmp_path: Path) -> 
     assert f'"verdict": "{VerificationVerdict.VERIFIED.value}"' in report.read_text(
         "utf-8"
     )
+
+
+@pytest.mark.asyncio
+async def test_verified_run_stages_learning_and_binds_full_release_receipt(
+    tmp_path: Path,
+) -> None:
+    control, candidate = _workspaces(tmp_path)
+    coordinator, _ = _coordinator(tmp_path)
+    learning = _LearningSink()
+    receipt = {"verification_run_id": "run-learning", "commit_sha": "a" * 40}
+
+    class ReceiptReference(str):
+        pass
+
+    class ReleaseWithReceipt(_Release):
+        async def release_verified(self, request):
+            await super().release_verified(request)
+            reference = ReceiptReference("https://github.com/example/repo/pull/2")
+            reference.receipt = receipt
+            return reference
+
+    outcome = await coordinator.run(
+        CoordinatorRunRequest(
+            run_id="run-learning",
+            incident=_incident(),
+            control_workspace=str(control),
+            candidate_workspace=str(candidate),
+            max_cycles=1,
+        ),
+        repair_agent=_Repair(candidate),
+        lightweight_verifier=_Lightweight((LightweightVerdict.PASS,)),
+        planner=_Planner(_proposal(_incident())),
+        release_action=ReleaseWithReceipt(),
+        learning_sink=learning,
+    )
+
+    assert outcome.status is CoordinatorStatus.RELEASED
+    assert len(learning.captures) == 1
+    captured = learning.captures[0]
+    assert captured["report"].verdict is VerificationVerdict.VERIFIED
+    assert captured["candidate"].candidate_digest == outcome.candidate_digest
+    assert captured["plan"].digest == captured["replay_receipt"].plan_digest
+    assert learning.receipts == [receipt]
 
 
 @pytest.mark.asyncio

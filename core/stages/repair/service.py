@@ -4,8 +4,8 @@ This relocates the old ``core.agents.verification_workflow.FreshContextRepairAge
 out of the verification namespace and fixes its two real defects:
 
 1. It hard-coded ``REPAIR_SYSTEM_PROMPT``; the SOP now comes from the frozen
-   ``skills/repair/SKILL.md`` snapshot (a fresh sub-agent has ``skills=[]`` so it
-   could never load it via ``Load_Skill`` off disk).
+   ``skills/repair/SKILL.md`` snapshot, while a bounded catalog snapshot exposes
+   newly learned ``learned-repair-*`` references through ``Load_Skill``.
 2. It consumed unstructured ``previous_failures: tuple[str]``; it now takes a
    structured, owner-filtered ``RepairFeedbackBundle`` (only ``owner == REPAIR``
    findings ever reach repair).
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import Field, ValidationError
 
@@ -31,7 +32,10 @@ from core.agents.verification_workflow import (
     build_repair_can_use_tool,
     select_repair_tools,
 )
-from core.agents.workspace_guard import build_workspace_guard
+from core.agents.workspace_guard import (
+    build_workspace_guard,
+    restricted_paths_for_workspace,
+)
 from core.contracts.base import Contract
 from core.contracts.repair import (
     RepairCycleRequest,
@@ -46,6 +50,9 @@ from core.stages.common import (
     parse_final_json,
 )
 from core.verification.runner import workspace_digest
+
+if TYPE_CHECKING:
+    from core.learning.catalog import LearnedSkillCatalog
 
 _DEFAULT_REPAIR_SKILL = "skills/repair/SKILL.md"
 
@@ -67,12 +74,22 @@ class RepairStage:
         workspace_ignore: tuple[str, ...],
         skill_path: str | Path = _DEFAULT_REPAIR_SKILL,
         max_turns: int = 24,
+        learned_skill_catalog: "LearnedSkillCatalog | None" = None,
+        learned_skill_limit: int = 3,
     ):
         if max_turns < 1:
             raise ValueError("repair max_turns must be positive")
+        if learned_skill_limit < 1:
+            raise ValueError("learned_skill_limit must be positive")
         self.workspace_ignore = tuple(workspace_ignore)
         self.max_turns = max_turns
         self.frozen_skill: FrozenStageSkill = freeze_stage_skill(skill_path)
+        if learned_skill_catalog is None:
+            from core.learning.catalog import default_learned_skill_catalog
+
+            learned_skill_catalog = default_learned_skill_catalog()
+        self.learned_skill_catalog = learned_skill_catalog
+        self.learned_skill_limit = learned_skill_limit
 
     async def repair(
         self,
@@ -88,6 +105,34 @@ class RepairStage:
         if not workspace.is_dir():
             raise AgentWorkflowError("candidate workspace does not exist")
 
+        signature = frozen.incident.failure_signature
+        learned_skills = (
+            self.learned_skill_catalog.skill_metas(
+                query={
+                    "matched_rule": frozen.incident.matched_rule,
+                    "signature_code": signature.code,
+                    "error_type": signature.error_type,
+                    "event_code": signature.event_code,
+                    "message": signature.message_pattern or "",
+                    "source_paths": tuple(
+                        location.path for location in frozen.incident.source_locations
+                    ),
+                },
+                limit=self.learned_skill_limit,
+            )
+            if self.learned_skill_catalog is not None
+            else []
+        )
+        from core.learning.runtime import default_learning_archive_root
+
+        restricted_paths = restricted_paths_for_workspace(
+            workspace,
+            (
+                self.learned_skill_catalog.root,
+                default_learning_archive_root(),
+            ),
+        )
+
         tools = _bind_isolated_bash(
             select_repair_tools(parent_params.tools),
             workspace=workspace,
@@ -101,6 +146,10 @@ class RepairStage:
         if missing:
             raise AgentWorkflowError(
                 "repair stage missing required tools: " + ", ".join(sorted(missing))
+            )
+        if learned_skills and "Load_Skill" not in {tool.name for tool in tools}:
+            raise AgentWorkflowError(
+                "repair stage selected learned skills but Load_Skill is unavailable"
             )
 
         findings_json = json.dumps(
@@ -136,19 +185,37 @@ class RepairStage:
             parent_agent_state=parent_agent_state,
             parent_params=parent_params,
             task_prompt=task_prompt,
-            tracer=tracer.child(agent_type=REPAIR_AGENT_TYPE, depth=1),
+            tracer=tracer.child(
+                agent_type=REPAIR_AGENT_TYPE,
+                stage="repair",
+                run_id=frozen.run_id,
+                incident_id=frozen.incident.incident_id,
+                cycle=frozen.cycle,
+                depth=1,
+            ),
             context_mode="fresh",
-            system_override=build_stage_system_prompt(frozen=self.frozen_skill),
+            system_override=build_stage_system_prompt(
+                frozen=self.frozen_skill,
+                allow_learned_skills=bool(learned_skills),
+            ),
             tools_override=tools,
             cwd_override=str(workspace),
             transcript_path=_child_transcript(
                 parent_params.transcript_path,
                 f"repair-{frozen.run_id}-{frozen.cycle}",
             ),
+            skills_override=learned_skills,
+            trajectory_context={
+                "run_id": frozen.run_id,
+                "incident_id": frozen.incident.incident_id,
+                "stage": "repair",
+                "cycle": frozen.cycle,
+            },
             can_use_tool=build_workspace_guard(
                 build_repair_can_use_tool(parent_params.can_use_tool),
                 workspace=workspace,
                 allowed_tool_names=REPAIR_TOOL_NAMES,
+                restricted_relative_paths=restricted_paths,
             ),
             max_turns=self.max_turns,
             abort_signal=parent_params.abort_signal,
@@ -175,6 +242,8 @@ class RepairStage:
             candidate_ref=f"candidate:{frozen.run_id}:{frozen.cycle}:{digest[:16]}",
             implementation_summary=handoff.implementation_summary,
             test_entrypoints=handoff.test_entrypoints,
+            unresolved_risks=handoff.unresolved_risks,
+            trajectory_path=result.trajectory_path,
         )
 
 

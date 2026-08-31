@@ -3,6 +3,7 @@
 stream 是 Phase 1 端到端直通的核心: parse_sse 只 yield str → json.loads → StreamEvent。
 """
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -16,7 +17,9 @@ from core.provider_errors import (
 from core.providers.anthropic import AnthropicAdapter, to_anthropic, to_anthropic_tools
 from core.types import (
     AssistantMessage,
+    RedactedThinkingBlock,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -53,6 +56,31 @@ def test_to_anthropic_assistant_tool_use_and_tool_result():
             {"type": "tool_result", "tool_use_id": "c1", "content": "done", "is_error": False}
         ],
     }
+
+
+def test_to_anthropic_round_trips_provider_visible_reasoning_blocks():
+    out = to_anthropic(
+        [
+            AssistantMessage(
+                content=[
+                    ThinkingBlock(thinking="inspect", signature="signed"),
+                    RedactedThinkingBlock(data="opaque"),
+                    TextBlock(text="final"),
+                ]
+            )
+        ]
+    )
+
+    assert out == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "inspect", "signature": "signed"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "final"},
+            ],
+        }
+    ]
 
 
 def test_to_anthropic_tools_empty_list():
@@ -115,6 +143,51 @@ async def test_stream_translates_sse_to_stream_events():
     md = [e for e in events if e.type == "message_delta"][0]
     assert md.delta["stop_reason"] == "end_turn"
     assert md.message["usage"]["output_tokens"] == 5
+
+
+@respx.mock
+async def test_stream_can_explicitly_request_provider_visible_thinking():
+    route = respx.post(f"{BASE}/v1/messages").mock(
+        return_value=httpx.Response(200, text=ANTHROPIC_SSE)
+    )
+    adapter = AnthropicAdapter(
+        api_key="k",
+        base_url=BASE,
+        thinking_budget_tokens=1024,
+    )
+
+    async for _ in adapter.stream(
+        messages=[UserMessage(content="hi")],
+        system="",
+        tools=[],
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        abort_signal=asyncio.Event(),
+        tracer=NoopTracer(),
+    ):
+        pass
+
+    payload = json.loads(route.calls.last.request.read())
+    assert payload["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 1024,
+    }
+
+
+async def test_thinking_budget_must_fit_the_response_budget():
+    adapter = AnthropicAdapter(api_key="k", thinking_budget_tokens=1024)
+
+    with pytest.raises(ValueError, match="lower than request max_tokens"):
+        async for _ in adapter.stream(
+            messages=[UserMessage(content="hi")],
+            system="",
+            tools=[],
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            abort_signal=asyncio.Event(),
+            tracer=NoopTracer(),
+        ):
+            pass
 
 
 @respx.mock

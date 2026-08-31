@@ -227,7 +227,7 @@ class ReleaseRequest(ReleaseModel):
 
 
 class PullRequestReceipt(ReleaseModel):
-    schema_version: Literal["github-pr-receipt/v1"] = "github-pr-receipt/v1"
+    schema_version: Literal["github-pr-receipt/v2"] = "github-pr-receipt/v2"
     app_id: str
     repository: str
     branch: str
@@ -238,6 +238,10 @@ class PullRequestReceipt(ReleaseModel):
     reviewers: tuple[str, ...] = Field(min_length=1)
     verification_run_id: str = Field(min_length=1)
     verification_cycle: int = Field(ge=1, le=3)
+    verification_incident_id: str = Field(min_length=1)
+    verification_incident_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verification_report_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     verification_report_path: str = Field(min_length=1)
 
 

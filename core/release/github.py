@@ -20,6 +20,7 @@ import httpx
 from core.verification import (
     AttestedJsonEvidenceStore,
     VerificationVerdict,
+    canonical_json_digest,
     workspace_digest,
 )
 
@@ -619,6 +620,12 @@ class ReleaseManager:
             reviewers=app.reviewers,
             verification_run_id=report.run_id,
             verification_cycle=report.cycle,
+            verification_incident_id=report.incident_id,
+            verification_incident_digest=report.incident_digest,
+            candidate_digest=report.candidate_digest,
+            verification_report_digest=canonical_json_digest(
+                report.model_dump(mode="json")
+            ),
             verification_report_path=report_path,
         )
         self._persist_receipt(receipt, app.release_receipt_root)

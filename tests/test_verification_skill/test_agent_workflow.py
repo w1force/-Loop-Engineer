@@ -13,7 +13,10 @@ import pytest
 
 from core.agent_loop import AgentConfig, submit
 from core.agents.verification_workflow import _bind_isolated_bash
-from core.agents.workspace_guard import build_workspace_guard
+from core.agents.workspace_guard import (
+    build_workspace_guard,
+    restricted_paths_for_workspace,
+)
 from core.builtin_tools import BASH_TOOL
 from core.builtin_tools.bash import BashInput
 from core.tools import CanUseDecision, ToolContext
@@ -177,6 +180,147 @@ async def test_workspace_guard_allows_static_workspace_paths_and_env_values(
     )
 
     assert decision.allow is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_guard_blocks_restricted_subtree_for_read_and_search(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "candidate"
+    source = workspace / "src"
+    history = workspace / ".loop-engineer" / "learned-repair-skills"
+    source.mkdir(parents=True)
+    history.mkdir(parents=True)
+    (source / "app.py").write_text("safe\n", encoding="utf-8")
+    (history / "SKILL.md").write_text("historical fix\n", encoding="utf-8")
+    guard = build_workspace_guard(
+        _allow_all,
+        workspace=workspace,
+        allowed_tool_names=frozenset({"Read", "Glob", "Grep", "Write", "Bash"}),
+        restricted_relative_paths=(
+            ".loop-engineer/learned-repair-skills",
+        ),
+    )
+
+    forbidden_calls = (
+        ToolUseBlock(
+            id="read-history",
+            name="Read",
+            input={"file_path": ".loop-engineer/learned-repair-skills/SKILL.md"},
+        ),
+        ToolUseBlock(
+            id="glob-history",
+            name="Glob",
+            input={
+                "pattern": "**/*",
+                "path": ".loop-engineer/learned-repair-skills",
+            },
+        ),
+        ToolUseBlock(
+            id="grep-history",
+            name="Grep",
+            input={
+                "pattern": "fix",
+                "path": ".loop-engineer/learned-repair-skills",
+            },
+        ),
+        # A recursive root search would otherwise traverse the restricted child.
+        ToolUseBlock(
+            id="glob-root",
+            name="Glob",
+            input={"pattern": "**/*"},
+        ),
+        ToolUseBlock(
+            id="grep-root",
+            name="Grep",
+            input={"pattern": "fix", "path": "."},
+        ),
+        ToolUseBlock(
+            id="bash-history",
+            name="Bash",
+            input={"command": "pytest .loop-engineer/learned-repair-skills"},
+        ),
+        ToolUseBlock(
+            id="write-history",
+            name="Write",
+            input={
+                "file_path": ".loop-engineer/learned-repair-skills/SKILL.md",
+                "content": "poisoned",
+            },
+        ),
+        ToolUseBlock(
+            id="implicit-rg-history",
+            name="Bash",
+            input={"command": "rg --hidden historical"},
+        ),
+        ToolUseBlock(
+            id="implicit-rg-all-history",
+            name="Bash",
+            input={"command": "rg -uu historical"},
+        ),
+        ToolUseBlock(
+            id="implicit-git-grep-history",
+            name="Bash",
+            input={"command": "git grep --no-index historical"},
+        ),
+        ToolUseBlock(
+            id="git-revision-history",
+            name="Bash",
+            input={
+                "command": (
+                    "git show HEAD:.loop-engineer/learned-repair-skills/SKILL.md"
+                )
+            },
+        ),
+    )
+
+    forbidden_decisions = [await guard(call) for call in forbidden_calls]
+    assert all(not decision.allow for decision in forbidden_decisions)
+    assert (
+        await guard(
+            ToolUseBlock(
+                id="read-source",
+                name="Read",
+                input={"file_path": "src/app.py"},
+            )
+        )
+    ).allow
+    assert (
+        await guard(
+            ToolUseBlock(
+                id="grep-source",
+                name="Grep",
+                input={"pattern": "safe", "path": "src"},
+            )
+        )
+    ).allow
+
+
+def test_workspace_guard_rejects_invalid_restricted_relative_path(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+
+    for invalid in ("", ".", "../history", str(tmp_path / "history")):
+        with pytest.raises(ValueError, match="restricted workspace path"):
+            build_workspace_guard(
+                _allow_all,
+                workspace=workspace,
+                allowed_tool_names=frozenset({"Read"}),
+                restricted_relative_paths=(invalid,),
+            )
+
+
+def test_control_plane_roots_are_mapped_or_fail_closed(tmp_path: Path) -> None:
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+
+    assert restricted_paths_for_workspace(workspace, (tmp_path / "outside",)) == ()
+
+    for protected in (workspace / "operator" / "skills", tmp_path):
+        with pytest.raises(ValueError, match="protected control-plane root"):
+            restricted_paths_for_workspace(workspace, (protected,))
 
 
 @pytest.mark.asyncio

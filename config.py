@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     base_url: str = "https://api.anthropic.com"
     model: str = "claude-sonnet-4-6"
     max_tokens: int = 4096
+    # 0 disables explicit Anthropic extended thinking. A positive value must be
+    # at least 1024 and lower than max_tokens.
+    thinking_budget_tokens: int = 0
     max_turns: int = 20
     debug_sse: bool = False  # LOOP_ENGINEER_DEBUG_SSE=true 时打印原始 SSE 流
     run_log_enabled: bool = True  # ★ 结构化运行日志(FileTracer 写 JSONL, jq 可查)

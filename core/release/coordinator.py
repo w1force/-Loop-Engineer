@@ -10,6 +10,17 @@ from .github import ReleaseError, ReleaseManager
 from .models import ReleaseRequest
 
 
+class PullRequestReference(str):
+    """String-compatible URL carrying the full immutable release receipt."""
+
+    receipt: object
+
+    def __new__(cls, receipt):
+        instance = str.__new__(cls, receipt.pull_request_url)
+        instance.receipt = receipt
+        return instance
+
+
 class CoordinatorReleaseAction:
     """Expose no generic publish method to the orchestration layer."""
 
@@ -38,7 +49,7 @@ class CoordinatorReleaseAction:
                 "ReleaseRequest 与 Coordinator VERIFIED Plan/Incident 绑定不一致"
             )
         receipt = await asyncio.to_thread(self.manager.release, self.request)
-        return receipt.pull_request_url
+        return PullRequestReference(receipt)
 
 
 __all__ = ["CoordinatorReleaseAction"]

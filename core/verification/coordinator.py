@@ -92,6 +92,12 @@ class VerifiedReleaseAction(Protocol):
     async def release_verified(self, request: "VerifiedReleaseRequest") -> str: ...
 
 
+class VerifiedTrajectorySink(Protocol):
+    async def capture_verified(self, **artifacts: Any) -> Any: ...
+
+    async def bind_release(self, receipt: Any) -> str: ...
+
+
 class EscalationHandler(Protocol):
     async def escalate(self, request: "HumanEscalation") -> str | None: ...
 
@@ -466,6 +472,7 @@ class VerificationCoordinator:
         lightweight_verifier: LightweightVerifier,
         planner: VerificationPlanner,
         release_action: VerifiedReleaseAction | None = None,
+        learning_sink: VerifiedTrajectorySink | None = None,
         escalation_handler: EscalationHandler | None = None,
     ) -> CoordinatorOutcome:
         request = CoordinatorRunRequest.model_validate_json(request.model_dump_json())
@@ -476,6 +483,7 @@ class VerificationCoordinator:
                 lightweight_verifier=lightweight_verifier,
                 planner=planner,
                 release_action=release_action,
+                learning_sink=learning_sink,
                 escalation_handler=escalation_handler,
             )
 
@@ -487,6 +495,7 @@ class VerificationCoordinator:
         lightweight_verifier: LightweightVerifier,
         planner: VerificationPlanner,
         release_action: VerifiedReleaseAction | None,
+        learning_sink: VerifiedTrajectorySink | None,
         escalation_handler: EscalationHandler | None,
     ) -> CoordinatorOutcome:
         # Lazy import breaks the module-load cycle
@@ -694,6 +703,23 @@ class VerificationCoordinator:
 
                 state = state.model_copy(update={"status": CoordinatorStatus.VERIFIED})
                 self.state_store.save(state)
+                learning_failures: tuple[str, ...] = ()
+                if learning_sink is not None:
+                    try:
+                        await learning_sink.capture_verified(
+                            request=request,
+                            repair=repair,
+                            candidate=candidate,
+                            plan=plan,
+                            replay_receipt=receipt,
+                            report=report,
+                            prior_failures=prior_failures,
+                        )
+                    except Exception as exc:  # learning must not block remediation
+                        learning_failures = (
+                            "trajectory learning capture failed: "
+                            f"{type(exc).__name__}: {exc}",
+                        )
                 if release_action is None:
                     return CoordinatorOutcome(
                         run_id=request.run_id,
@@ -703,9 +729,10 @@ class VerificationCoordinator:
                         evidence_location=latest_evidence,
                         candidate_ref=plan.candidate_ref,
                         candidate_digest=plan.candidate_digest,
+                        failures=learning_failures,
                     )
                 try:
-                    release_reference = await release_action.release_verified(
+                    published = await release_action.release_verified(
                         VerifiedReleaseRequest(
                             run_id=request.run_id,
                             cycle=cycle,
@@ -720,6 +747,24 @@ class VerificationCoordinator:
                             evidence_location=latest_evidence,
                         )
                     )
+                    release_reference = str(published)
+                    if learning_sink is not None:
+                        release_receipt = getattr(published, "receipt", None)
+                        if release_receipt is None:
+                            learning_failures = (
+                                *learning_failures,
+                                "trajectory learning receipt bind skipped: release action "
+                                "returned no PullRequestReceipt",
+                            )
+                        else:
+                            try:
+                                await learning_sink.bind_release(release_receipt)
+                            except Exception as exc:  # PR exists; do not report it blocked
+                                learning_failures = (
+                                    *learning_failures,
+                                    "trajectory learning receipt bind failed: "
+                                    f"{type(exc).__name__}: {exc}",
+                                )
                 except Exception as exc:
                     failure = f"release blocked: {type(exc).__name__}: {exc}"
                     state = state.model_copy(
@@ -734,7 +779,7 @@ class VerificationCoordinator:
                         evidence_location=latest_evidence,
                         candidate_ref=plan.candidate_ref,
                         candidate_digest=plan.candidate_digest,
-                        failures=(failure,),
+                        failures=(*learning_failures, failure),
                     )
                 state = state.model_copy(
                     update={
@@ -752,6 +797,7 @@ class VerificationCoordinator:
                     release_reference=release_reference,
                     candidate_ref=plan.candidate_ref,
                     candidate_digest=plan.candidate_digest,
+                    failures=learning_failures,
                 )
             except Exception as exc:
                 exc_findings = (classify_exception(exc, stage=StageName.VERIFICATION),)

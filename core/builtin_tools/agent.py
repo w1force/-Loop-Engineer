@@ -12,6 +12,7 @@ from core.agents.verification import (
     VERIFICATION_AGENT_TYPE,
     VERIFICATION_SYSTEM_PROMPT,
     build_verification_can_use_tool,
+    build_verification_workspace_guard,
     select_verification_tools,
 )
 from core.forked_agent import run_subagent
@@ -80,8 +81,9 @@ async def _agent_func(inp: AgentInput, ctx: ToolContext) -> str:
         transcript_path=_verification_transcript_path(
             parent_params.transcript_path
         ),
-        can_use_tool=build_verification_can_use_tool(
-            parent_params.can_use_tool
+        can_use_tool=build_verification_workspace_guard(
+            build_verification_can_use_tool(parent_params.can_use_tool),
+            workspace=ctx.agent_state.cwd,
         ),
         max_turns=parent_params.verification_agent_max_turns,
         abort_signal=ctx.abort_signal,

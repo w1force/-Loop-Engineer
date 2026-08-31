@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 from .lsp.constants import LSP_TOOL_NAME
 from .tools import CanUseDecision, default_can_use_tool
@@ -18,6 +20,7 @@ from .types import (
     TextBlock,
     Usage,
     UserMessage,
+    SkillMeta,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +53,7 @@ class SubagentRunResult:
     context_mode: SubagentContextMode
     model: str
     error: str | None = None
+    trajectory_path: str | None = None
 
     @property
     def successful(self) -> bool:
@@ -113,6 +117,8 @@ async def run_subagent(
     tools_override: list["Tool"] | None = None,
     cwd_override: str | None = None,
     transcript_path: str | None = None,
+    skills_override: Sequence[SkillMeta] | None = None,
+    trajectory_context: dict[str, Any] | None = None,
     can_use_tool: Callable = default_can_use_tool,
     max_turns: int = 5,
     abort_signal: asyncio.Event | None = None,
@@ -145,7 +151,10 @@ async def run_subagent(
     initial_message_count = len(child_messages)
     child_state = AgentState(
         messages=child_messages,
-        skills=[],
+        # Fresh context means no parent conversation, not "no skills".  Trusted
+        # stage callers may expose a pre-filtered snapshot (for example only
+        # learned-repair-* Skills from one fixed catalog root).
+        skills=list(skills_override or ()),
         cwd=cwd_override or parent_agent_state.cwd,
     )
     child_params = QueryParams(
@@ -173,6 +182,7 @@ async def run_subagent(
 
     terminal = Terminal(reason=TerminalReason.COMPLETED)
     error: str | None = None
+    trajectory_path: str | None = None
     try:
         async for item in query_loop(child_state, child_params, tracer):
             if isinstance(item, Terminal):
@@ -199,6 +209,39 @@ async def run_subagent(
                 await record_transcript(child_state.messages, transcript)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("subagent transcript write failed: %s", exc)
+        if trajectory_context is not None:
+            try:
+                from .learning.trajectory import record_sharegpt_trajectory
+
+                trajectory_base = transcript_path
+                if trajectory_base is None:
+                    identity = sha256(
+                        json.dumps(
+                            trajectory_context,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()[:12]
+                    trace_path = getattr(tracer, "path", None)
+                    trace = Path(trace_path) if trace_path else Path("logs/run.jsonl")
+                    trajectory_base = trace.with_name(
+                        f"{trace.stem}.repair-{identity}.transcript.jsonl"
+                    )
+                trajectory_path = await record_sharegpt_trajectory(
+                    transcript_path=trajectory_base,
+                    system=child_params.system,
+                    messages=child_state.messages,
+                    tools=child_params.tools,
+                    model=child_params.model,
+                    completed=(
+                        terminal.reason is TerminalReason.COMPLETED and error is None
+                    ),
+                    terminal_reason=terminal.reason.value,
+                    context=trajectory_context,
+                    tracer=tracer,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("subagent ShareGPT trajectory write failed: %s", exc)
 
     child_output = child_state.messages[initial_message_count:]
     return SubagentRunResult(
@@ -209,6 +252,7 @@ async def run_subagent(
         context_mode=context_mode,
         model=parent_params.model,
         error=error,
+        trajectory_path=trajectory_path,
     )
 
 

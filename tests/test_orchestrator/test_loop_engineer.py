@@ -9,6 +9,7 @@ covered by tests/test_verification_skill/test_coordinator.py.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,6 +117,7 @@ async def test_loop_engineer_runs_diagnosis_then_coordinator(tmp_path: Path) -> 
         candidate_workspace=str(tmp_path / "candidate"),
     )
     (tmp_path / "candidate").mkdir()
+    learning_sink = object()
 
     outcome = await engine.run(
         request,
@@ -124,6 +126,7 @@ async def test_loop_engineer_runs_diagnosis_then_coordinator(tmp_path: Path) -> 
         tracer=object(),
         lightweight_verifier=object(),
         planner=object(),
+        learning_sink=learning_sink,
         control_reproducer=_ReproducedControl(),
     )
 
@@ -138,9 +141,52 @@ async def test_loop_engineer_runs_diagnosis_then_coordinator(tmp_path: Path) -> 
     assert coord_request.incident.root_cause == "deadline reused across retries"
     # Repair is wired through the RepairStage adapter, not FreshContextRepairAgent.
     assert isinstance(adapters["repair_agent"], _RepairStageAgent)
+    assert adapters["learning_sink"] is learning_sink
     assert outcome.verified is True
     assert outcome.incident_digest == coord_request.incident.digest
     assert outcome.reproduction_disposition is ReproductionDisposition.REPRODUCED
+
+
+@pytest.mark.asyncio
+async def test_loop_engineer_wires_default_learning_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnosis = _StubDiagnosisStage(_proposal())
+    coordinator = _StubCoordinator()
+    engine = LoopEngineer(
+        diagnosis_stage=diagnosis,
+        incident_freezer=IncidentFreezer(),
+        repair_stage=object(),
+        coordinator=coordinator,
+    )
+    request = LoopRunRequest(
+        run_id="run-default-learning",
+        diagnosis=_diagnosis_request(tmp_path),
+        candidate_workspace=str(tmp_path / "candidate"),
+    )
+    (tmp_path / "candidate").mkdir()
+    learning = object()
+    monkeypatch.setattr(
+        "core.learning.runtime.build_default_learning_service",
+        lambda provider, *, agent_model, tracer: learning,
+    )
+
+    class _Tracer:
+        def child(self, **_):
+            return self
+
+    await engine.run(
+        request,
+        parent_agent_state=object(),
+        parent_params=SimpleNamespace(provider=object(), model="model-a"),
+        tracer=_Tracer(),
+        lightweight_verifier=object(),
+        planner=object(),
+        release_action=object(),
+        control_reproducer=_ReproducedControl(),
+    )
+
+    assert coordinator.calls[0][1]["learning_sink"] is learning
 
 
 @pytest.mark.asyncio

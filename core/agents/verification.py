@@ -10,8 +10,13 @@ import shlex
 from core.tools import CanUseDecision, Tool, default_can_use_tool
 from core.types import ToolUseBlock
 
+from .workspace_guard import build_workspace_guard, restricted_paths_for_workspace
+
 VERIFICATION_AGENT_TYPE = "verification"
 VERIFICATION_TOOL_NAMES = frozenset({"Read", "Glob", "Grep", "Bash"})
+VERIFICATION_RESTRICTED_RELATIVE_PATHS = (
+    ".loop-engineer/learned-repair-skills",
+)
 
 VERIFICATION_MAIN_AGENT_GUIDANCE = """
 
@@ -74,6 +79,7 @@ ADAPT TO THE CHANGE
 - Refactor: require unchanged existing tests and observable behavior.
 
 OUT OF SCOPE
+- Do not inspect .loop-engineer/learned-repair-skills or use repair-history Skills.
 - Do not compare control and candidate executions.
 - Do not evaluate Trace, production/pre-production logs, or cross-run behavior.
 - Do not perform browser/UI verification.
@@ -429,10 +435,44 @@ def build_verification_can_use_tool(
     return can_use_tool
 
 
+def build_verification_workspace_guard(
+    parent_can_use_tool: Callable[[ToolUseBlock], Awaitable[CanUseDecision]],
+    *,
+    workspace: str | Path,
+    allowed_tool_names: frozenset[str] = VERIFICATION_TOOL_NAMES,
+) -> Callable[[ToolUseBlock], Awaitable[CanUseDecision]]:
+    """Keep every Verification Agent isolated from learned repair history."""
+
+    # Resolve configuration at Agent start so an operator-selected absolute or
+    # relative catalog path cannot bypass the fixed default-name restriction.
+    from core.learning.catalog import default_learned_skill_catalog
+    from core.learning.runtime import default_learning_archive_root
+
+    restricted = restricted_paths_for_workspace(
+        workspace,
+        (
+            default_learned_skill_catalog().root,
+            default_learning_archive_root(),
+        ),
+    )
+
+    return build_workspace_guard(
+        parent_can_use_tool,
+        workspace=workspace,
+        allowed_tool_names=allowed_tool_names,
+        restricted_relative_paths=(
+            *VERIFICATION_RESTRICTED_RELATIVE_PATHS,
+            *restricted,
+        ),
+    )
+
+
 __all__ = [
     "VERIFICATION_AGENT_TYPE",
     "VERIFICATION_MAIN_AGENT_GUIDANCE",
+    "VERIFICATION_RESTRICTED_RELATIVE_PATHS",
     "VERIFICATION_SYSTEM_PROMPT",
     "build_verification_can_use_tool",
+    "build_verification_workspace_guard",
     "select_verification_tools",
 ]

@@ -92,6 +92,7 @@ class AnthropicAdapter(BaseAdapter, Provider):
         base_url: str = "https://api.anthropic.com",
         debug_sse: bool = False,
         enable_cache_editing: bool = False,
+        thinking_budget_tokens: int = 0,
     ):
         headers = {
             "x-api-key": api_key,
@@ -104,6 +105,9 @@ class AnthropicAdapter(BaseAdapter, Provider):
         # 缓存感知式 microcompact 的操作员总开关(对齐 CC 的 CLAUDE_CACHED_MICROCOMPACT 显式 opt-in)。
         # 默认关。即便开了,也必须 base_url 是真 api.anthropic.com 才生效(见 supports_cache_editing)。
         self.enable_cache_editing = enable_cache_editing
+        if thinking_budget_tokens != 0 and thinking_budget_tokens < 1024:
+            raise ValueError("thinking_budget_tokens must be 0 or at least 1024")
+        self.thinking_budget_tokens = thinking_budget_tokens
 
     @property
     def is_first_party_anthropic(self) -> bool:
@@ -148,6 +152,22 @@ class AnthropicAdapter(BaseAdapter, Provider):
             "max_tokens": max_tokens,
             "stream": True,
         }
+        thinking_budget_tokens = opts.get(
+            "thinking_budget_tokens", self.thinking_budget_tokens
+        )
+        if thinking_budget_tokens:
+            if not isinstance(thinking_budget_tokens, int) or thinking_budget_tokens < 1024:
+                raise ValueError(
+                    "thinking_budget_tokens must be 0 or at least 1024"
+                )
+            if thinking_budget_tokens >= max_tokens:
+                raise ValueError(
+                    "thinking_budget_tokens must be lower than request max_tokens"
+                )
+            req_body["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": thinking_budget_tokens,
+            }
         if cache_edits:
             # 通知服务端删除这些 tool_use 的缓存结果(不改本地内容 → 保住热缓存前缀)。
             req_body["cache_edits"] = {

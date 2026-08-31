@@ -214,6 +214,8 @@ class RepairResult(VerificationModel):
     candidate_ref: str = Field(min_length=1)
     implementation_summary: str = Field(min_length=1)
     test_entrypoints: tuple[str, ...] = Field(min_length=1)
+    unresolved_risks: tuple[str, ...] = ()
+    trajectory_path: str | None = None
 
 
 class CandidateSnapshot(VerificationModel):
@@ -224,6 +226,8 @@ class CandidateSnapshot(VerificationModel):
     unified_diff: str = Field(min_length=1)
     implementation_summary: str = Field(min_length=1)
     test_entrypoints: tuple[str, ...] = Field(min_length=1)
+    unresolved_risks: tuple[str, ...] = ()
+    trajectory_path: str | None = None
 
 
 def _read_snapshot_bytes(root: Path, relative: str) -> bytes | None:
@@ -338,6 +342,8 @@ def capture_candidate_snapshot(
         unified_diff=rendered,
         implementation_summary=repair.implementation_summary,
         test_entrypoints=repair.test_entrypoints,
+        unresolved_risks=repair.unresolved_risks,
+        trajectory_path=repair.trajectory_path,
     )
 
 

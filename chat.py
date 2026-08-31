@@ -55,6 +55,7 @@ def _build(config_cwd: str, log_path: str):
         api_key=settings.api_key,
         base_url=settings.base_url,
         debug_sse=False,  # a chat REPL must stay clean; ignore LOOP_ENGINEER_DEBUG_SSE
+        thinking_budget_tokens=settings.thinking_budget_tokens,
     )
     chain_id = f"ccb-chat-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     tracer = FileTracer(path=log_path, ctx={"chain_id": chain_id}, enabled=True)

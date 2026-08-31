@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +25,14 @@ from core.builtin_tools import (
     WRITE_TOOL,
 )
 from core.loop.orchestrator import QueryParams
-from core.types import AgentState, AssistantMessage, StreamEvent, TextBlock, UserMessage
+from core.types import (
+    AgentState,
+    AssistantMessage,
+    StreamEvent,
+    TextBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 from core.verification.workflow import (
     ArtifactReference,
     AvailableVerificationSkill,
@@ -326,6 +334,69 @@ async def test_planner_uses_fresh_context_read_only_tools_and_strict_json(
 
 
 @pytest.mark.asyncio
+async def test_planner_cannot_search_learned_repair_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    history = (
+        Path(request.control_workspace)
+        / ".loop-engineer"
+        / "learned-repair-skills"
+    )
+    history.mkdir(parents=True)
+    (history / "SKILL.md").write_text("historical fix", encoding="utf-8")
+    proposal = _proposal(request)
+    decisions = {}
+
+    async def fake_run_subagent(**kwargs):
+        guard = kwargs["can_use_tool"]
+        decisions["history"] = await guard(
+            ToolUseBlock(
+                id="history",
+                name="Read",
+                input={
+                    "file_path": ".loop-engineer/learned-repair-skills/SKILL.md"
+                },
+            )
+        )
+        decisions["root_search"] = await guard(
+            ToolUseBlock(
+                id="root-search",
+                name="Glob",
+                input={"pattern": "**/*"},
+            )
+        )
+        decisions["source"] = await guard(
+            ToolUseBlock(
+                id="source",
+                name="Read",
+                input={"file_path": "service.py"},
+            )
+        )
+        return SimpleNamespace(
+            successful=True,
+            error=None,
+            terminal=SimpleNamespace(error=None),
+            final_text=proposal.model_dump_json(),
+            usage=SimpleNamespace(input_tokens=0, output_tokens=0),
+        )
+
+    monkeypatch.setattr(
+        "core.agents.verification_planning.run_subagent", fake_run_subagent
+    )
+    planner = FreshContextVerificationPlanner(
+        parent_agent_state=AgentState(cwd=str(tmp_path)),
+        parent_params=_params(_Provider("unused")),
+        tracer=NoopTracer(),
+    )
+
+    assert await planner.propose(request) == proposal
+    assert decisions["history"].allow is False
+    assert decisions["root_search"].allow is False
+    assert decisions["source"].allow is True
+
+
+@pytest.mark.asyncio
 async def test_planner_selects_from_metadata_before_loading_full_generation_skill(
     tmp_path: Path,
 ) -> None:
@@ -509,6 +580,97 @@ async def test_lightweight_adapter_parses_single_final_verdict(tmp_path: Path) -
         "Grep",
         "Bash",
     ]
+
+
+@pytest.mark.asyncio
+async def test_lightweight_verifier_blocks_history_but_repair_keeps_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planning_request = _request(tmp_path)
+    workspace = Path(planning_request.candidate.workspace)
+    history = workspace / ".loop-engineer" / "learned-repair-skills"
+    history.mkdir(parents=True)
+    (history / "SKILL.md").write_text("historical fix", encoding="utf-8")
+    decisions = {}
+
+    async def fake_verification_run(**kwargs):
+        decisions["verification"] = await kwargs["can_use_tool"](
+            ToolUseBlock(
+                id="verification-history",
+                name="Grep",
+                input={
+                    "pattern": "historical",
+                    "path": ".loop-engineer/learned-repair-skills",
+                },
+            )
+        )
+        return SimpleNamespace(
+            successful=True,
+            error=None,
+            terminal=SimpleNamespace(error=None),
+            final_text="focused evidence\nVERDICT: PASS",
+            usage=SimpleNamespace(input_tokens=0, output_tokens=0),
+        )
+
+    monkeypatch.setattr(
+        "core.agents.verification_workflow.run_subagent", fake_verification_run
+    )
+    verifier = FreshContextLightweightVerifier(
+        parent_agent_state=AgentState(cwd=str(tmp_path)),
+        parent_params=_params(_Provider("unused")),
+        tracer=NoopTracer(),
+    )
+    result = await verifier.verify(
+        LightweightVerificationRequest(
+            run_id="run-1",
+            cycle=1,
+            incident=planning_request.incident,
+            candidate=planning_request.candidate,
+        )
+    )
+
+    async def fake_repair_run(**kwargs):
+        decisions["repair"] = await kwargs["can_use_tool"](
+            ToolUseBlock(
+                id="repair-history",
+                name="Read",
+                input={
+                    "file_path": ".loop-engineer/learned-repair-skills/SKILL.md"
+                },
+            )
+        )
+        return SimpleNamespace(
+            successful=True,
+            error=None,
+            terminal=SimpleNamespace(error=None),
+            final_text=(
+                '{"implementation_summary":"use historical clue",'
+                '"test_entrypoints":["pytest tests/test_checkout.py"]}'
+            ),
+            usage=SimpleNamespace(input_tokens=0, output_tokens=0),
+        )
+
+    monkeypatch.setattr(
+        "core.agents.verification_workflow.run_subagent", fake_repair_run
+    )
+    repair = FreshContextRepairAgent(
+        parent_agent_state=AgentState(cwd=str(tmp_path)),
+        parent_params=_params(_Provider("unused")),
+        tracer=NoopTracer(),
+        workspace_ignore=(),
+    )
+    await repair.repair(
+        RepairCycleRequest(
+            run_id="run-1",
+            cycle=1,
+            incident=planning_request.incident,
+            candidate_workspace=planning_request.candidate.workspace,
+        )
+    )
+
+    assert result.verdict is LightweightVerdict.PASS
+    assert decisions["verification"].allow is False
+    assert decisions["repair"].allow is True
 
 
 @pytest.mark.asyncio

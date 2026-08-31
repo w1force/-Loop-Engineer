@@ -16,8 +16,10 @@ from pydantic import BaseModel
 from ...types import (
     AssistantMessage,
     QueryState,
+    RedactedThinkingBlock,
     StreamEvent,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
     Usage,
 )
@@ -36,9 +38,11 @@ def _to_block(b: dict):
     if t == "tool_use":
         return ToolUseBlock(id=b.get("id", ""), name=b.get("name", ""), input=b.get("input", {}))
     if t == "thinking":
-        return TextBlock(text=b.get("thinking", ""))
+        return ThinkingBlock(
+            thinking=b.get("thinking", ""), signature=b.get("signature", "")
+        )
     if t == "redacted_thinking":
-        return TextBlock(text="[redacted thinking]")
+        return RedactedThinkingBlock(data=b.get("data", ""))
     # 未知块:空文本兜底,绝不把 dict 字符串化混进答案
     return TextBlock(text="")
 
@@ -89,6 +93,8 @@ async def aggregate_stream(
                     b["input_buf"] = b.get("input_buf", "") + d["tool_input"]
                 if "thinking" in d:  # thinking_delta:累积思考内容(思考模型)
                     b["thinking"] = b.get("thinking", "") + d["thinking"]
+                if "signature" in d:  # signature_delta:保留供下一轮 provider 校验
+                    b["signature"] = b.get("signature", "") + d["signature"]
                 # delta 不进 raw_events(量大,内容已聚合进 blocks)
             elif evt.type == "content_block_stop":
                 idx = evt.index
@@ -252,7 +258,9 @@ async def stream_turn(
         tracer=tracer,
         **extra,
     )
-    all_blocks: list[TextBlock | ToolUseBlock] = []
+    all_blocks: list[
+        TextBlock | ThinkingBlock | RedactedThinkingBlock | ToolUseBlock
+    ] = []
     tool_calls: list[ToolUseBlock] = []
     needs_follow_up = False
     stop_reason: str | None = None

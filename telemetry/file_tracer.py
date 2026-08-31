@@ -62,6 +62,18 @@ class FileTracer:
         except Exception:
             pass  # 埋点永不影响主流程
 
+    @property
+    def path(self) -> str:
+        """Resolved trace path for durable trajectory sidecars."""
+
+        return self._path
+
+    @property
+    def context(self) -> dict:
+        """A defensive copy of the binding used to filter child events."""
+
+        return dict(self._ctx)
+
     def child(self, **ctx) -> "FileTracer":
         """派生子 tracer:合并额外 ctx(如 turn=n),共享同一文件与 seq 计数。"""
         return FileTracer(

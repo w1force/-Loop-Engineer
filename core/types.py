@@ -25,6 +25,21 @@ class TextBlock(BaseModel):
     text: str
 
 
+class ThinkingBlock(BaseModel):
+    """Provider-visible reasoning that must not be mixed into final answer text."""
+
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str = ""
+
+
+class RedactedThinkingBlock(BaseModel):
+    """Opaque provider reasoning block retained for protocol round-trips."""
+
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str = ""
+
+
 class ToolUseBlock(BaseModel):
     type: Literal["tool_use"] = "tool_use"
     id: str
@@ -59,7 +74,9 @@ class UserMessage(BaseModel):
 
 class AssistantMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
-    content: list[TextBlock | ToolUseBlock]
+    content: list[
+        TextBlock | ThinkingBlock | RedactedThinkingBlock | ToolUseBlock
+    ]
     model: str | None = None
     stop_reason: str | None = None
     usage: Usage | None = None
@@ -158,6 +175,10 @@ class SkillMeta:
     description: str     # frontmatter.description,进 system 目录段
     skill_dir: Path      # skill 目录绝对路径
     skill_md: Path       # SKILL.md 绝对路径(= skill_dir / "SKILL.md")
+    # Learned Skills are frozen when a stage starts. Generic interactive Skills keep
+    # these fields empty and retain the historical live-read behavior.
+    snapshot_text: str | None = None
+    digest: str | None = None
 
 
 class QueryState(BaseModel):

@@ -7,7 +7,14 @@ from core.loop.orchestrator import QueryParams
 from core.loop.phases.stream_turn import StreamOutcome, stream_turn
 from core.tools import Tool, ToolContext, default_can_use_tool
 from core.tool_executor import StreamingToolExecutor
-from core.types import AgentState, QueryState, StreamEvent, UserMessage
+from core.types import (
+    AgentState,
+    QueryState,
+    StreamEvent,
+    TextBlock,
+    ThinkingBlock,
+    UserMessage,
+)
 from telemetry.tracer import NoopTracer
 
 
@@ -149,3 +156,74 @@ async def test_withheld_none_when_end_turn():
             outcome = m
     assert outcome is not None
     assert outcome.withheld is None
+
+
+async def test_stream_turn_keeps_reasoning_separate_from_final_text():
+    class _FakeProvider:
+        def stream(self, **kwargs):
+            async def _g():
+                for event in (
+                    StreamEvent(type="message_start"),
+                    StreamEvent(
+                        type="content_block_start",
+                        index=0,
+                        block={"type": "thinking", "thinking": "", "signature": ""},
+                    ),
+                    StreamEvent(
+                        type="content_block_delta",
+                        index=0,
+                        delta={"thinking": "inspect root cause"},
+                    ),
+                    StreamEvent(
+                        type="content_block_delta",
+                        index=0,
+                        delta={"signature": "signed-reasoning"},
+                    ),
+                    StreamEvent(type="content_block_stop", index=0),
+                    StreamEvent(
+                        type="content_block_start",
+                        index=1,
+                        block={"type": "text", "text": ""},
+                    ),
+                    StreamEvent(
+                        type="content_block_delta",
+                        index=1,
+                        delta={"text": '{"implementation_summary":"done"}'},
+                    ),
+                    StreamEvent(type="content_block_stop", index=1),
+                    StreamEvent(
+                        type="message_delta",
+                        delta={"stop_reason": "end_turn"},
+                        message={"usage": {"input_tokens": 1, "output_tokens": 2}},
+                    ),
+                    StreamEvent(type="message_stop"),
+                ):
+                    yield event
+
+            return _g()
+
+        def count_tokens(self, messages):
+            return 0
+
+    state = QueryState(messages=[UserMessage(content="repair")])
+    agent_state = AgentState(messages=state.messages)
+    params = QueryParams(
+        system="",
+        model="m",
+        max_tokens=32,
+        provider=_FakeProvider(),
+        abort_signal=asyncio.Event(),
+    )
+
+    outcome = None
+    async for item in stream_turn(agent_state, state, params, NoopTracer(), None):
+        if isinstance(item, StreamOutcome):
+            outcome = item
+
+    assert outcome is not None
+    blocks = outcome.assistant_msgs[0].content
+    assert isinstance(blocks[0], ThinkingBlock)
+    assert blocks[0].thinking == "inspect root cause"
+    assert blocks[0].signature == "signed-reasoning"
+    assert isinstance(blocks[1], TextBlock)
+    assert blocks[1].text == '{"implementation_summary":"done"}'

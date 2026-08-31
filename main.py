@@ -55,7 +55,12 @@ async def demo_real_llm():
     
     # ── 入口2: 真实 LLM ────────────────────────────────
     s = get_settings()
-    provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url, debug_sse=s.debug_sse)
+    provider = AnthropicAdapter(
+        api_key=s.api_key,
+        base_url=s.base_url,
+        debug_sse=s.debug_sse,
+        thinking_budget_tokens=s.thinking_budget_tokens,
+    )
     tracer = FileTracer(path=s.run_log_path, ctx={"chain_id": "demo"}, enabled=s.run_log_enabled)
     config = AgentConfig(
         provider=provider,
@@ -83,7 +88,12 @@ async def demo_real_llm():
 async def real_tool_demo():
 # ── 入口2: 真实 LLM ────────────────────────────────
     s = get_settings()
-    provider = AnthropicAdapter(api_key=s.api_key, base_url=s.base_url, debug_sse=s.debug_sse)
+    provider = AnthropicAdapter(
+        api_key=s.api_key,
+        base_url=s.base_url,
+        debug_sse=s.debug_sse,
+        thinking_budget_tokens=s.thinking_budget_tokens,
+    )
     tracer = FileTracer(ctx={"chain_id": "demo"}, enabled=s.run_log_enabled)
     config = AgentConfig(
         provider=provider,

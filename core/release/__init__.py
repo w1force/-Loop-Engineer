@@ -2,6 +2,7 @@
 
 from .github import GitHubPullRequestPublisher, ReleaseError, ReleaseManager
 from .coordinator import CoordinatorReleaseAction
+from .review import GitHubReviewClient, GitHubReviewMonitor, GitHubReviewResolver
 from .models import (
     ApplicationRegistry,
     ApplicationSpec,
@@ -14,6 +15,9 @@ __all__ = [
     "ApplicationSpec",
     "CoordinatorReleaseAction",
     "GitHubPullRequestPublisher",
+    "GitHubReviewClient",
+    "GitHubReviewMonitor",
+    "GitHubReviewResolver",
     "PullRequestReceipt",
     "ReleaseError",
     "ReleaseManager",

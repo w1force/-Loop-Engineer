@@ -134,6 +134,7 @@ class LoopEngineer:
         coordinator: VerificationCoordinator,
         diagnosis_retry_controller: DiagnosisRetryController | None = None,
         control_reproducer: ControlReproducer | None = None,
+        learning_sink=None,
     ):
         self.diagnosis_stage = diagnosis_stage
         self.incident_freezer = incident_freezer
@@ -145,6 +146,7 @@ class LoopEngineer:
         self.control_reproducer = control_reproducer or CommandControlReproducer(
             evidence_store=self.diagnosis_retry_controller.state_store
         )
+        self.learning_sink = learning_sink
 
     async def run(
         self,
@@ -156,10 +158,24 @@ class LoopEngineer:
         lightweight_verifier,
         planner,
         release_action=None,
+        learning_sink=None,
         escalation_handler=None,
         control_reproducer: ControlReproducer | None = None,
     ) -> LoopOutcome:
         request = LoopRunRequest.model_validate_json(request.model_dump_json())
+        active_learning_sink = learning_sink
+        if active_learning_sink is None:
+            active_learning_sink = self.learning_sink
+        if active_learning_sink is None and release_action is not None:
+            provider = getattr(parent_params, "provider", None)
+            if provider is not None:
+                from core.learning.runtime import build_default_learning_service
+
+                active_learning_sink = build_default_learning_service(
+                    provider,
+                    agent_model=parent_params.model,
+                    tracer=tracer.child(stage="repair_learning"),
+                )
         state_store = self.diagnosis_retry_controller.state_store
         active_reproducer = control_reproducer or self.control_reproducer
 
@@ -211,6 +227,7 @@ class LoopEngineer:
                 parent_agent_state=parent_agent_state,
                 parent_params=parent_params,
                 tracer=tracer,
+                attempt=diagnosis_attempt,
             )
             incident = self.incident_freezer.freeze(
                 proposal, request=diagnosis_request
@@ -320,6 +337,7 @@ class LoopEngineer:
             lightweight_verifier=lightweight_verifier,
             planner=planner,
             release_action=release_action,
+            learning_sink=active_learning_sink,
             escalation_handler=escalation_handler,
         )
 

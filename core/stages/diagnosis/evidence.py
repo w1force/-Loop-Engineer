@@ -20,7 +20,7 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from core.agents.verification import (
-    build_verification_can_use_tool,
+    build_verification_workspace_guard,
     select_verification_tools,
 )
 from core.contracts.evidence import (
@@ -148,7 +148,10 @@ class DiagnosisEvidencePlanner:
             system_override=build_stage_system_prompt(frozen=self.frozen_skill),
             tools_override=tools,
             cwd_override=str(control),
-            can_use_tool=build_verification_can_use_tool(parent_params.can_use_tool),
+            can_use_tool=build_verification_workspace_guard(
+                parent_params.can_use_tool,
+                workspace=control,
+            ),
             max_turns=max_turns,
             abort_signal=parent_params.abort_signal,
             propagate_errors=False,

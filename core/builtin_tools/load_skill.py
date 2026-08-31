@@ -17,6 +17,8 @@ async def _load(inp: LoadSkillInput, ctx: ToolContext) -> str:
     meta = index.get(inp.name)
     if meta is None:
         return f"Error: skill '{inp.name}' not found. Available: {sorted(index)}"
+    if meta.snapshot_text is not None:
+        return meta.snapshot_text
     try:
         return meta.skill_md.read_text(encoding="utf-8")
     except OSError as e:
