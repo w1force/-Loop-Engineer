@@ -7,6 +7,7 @@ from .store import (
     LoopStateError,
     LoopStateStore,
     RunRecord,
+    SignalIngestResult,
     content_digest,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "LoopStateError",
     "LoopStateStore",
     "RunRecord",
+    "SignalIngestResult",
     "content_digest",
 ]

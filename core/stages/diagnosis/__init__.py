@@ -9,6 +9,23 @@ from .service import (
     DiagnosisStage,
     IncidentFreezer,
 )
+from .evidence import (
+    DiagnosisEvidencePlanner,
+    DiagnosisEvidenceRetriever,
+    EVIDENCE_PLANNER_AGENT_TYPE,
+    EvidencePlanFreezer,
+    EvidencePlanningError,
+)
+from .retry import (
+    CommandControlReproducer,
+    ControlReproducer,
+    DiagnosisReproductionRequest,
+    DiagnosisRetryAction,
+    DiagnosisRetryController,
+    DiagnosisRetryDecision,
+    DiagnosisRetryError,
+    diagnosis_hypothesis_digest,
+)
 
 __all__ = [
     "DIAGNOSIS_AGENT_TYPE",
@@ -16,4 +33,17 @@ __all__ = [
     "DiagnosisRequest",
     "DiagnosisStage",
     "IncidentFreezer",
+    "DiagnosisEvidencePlanner",
+    "DiagnosisEvidenceRetriever",
+    "EVIDENCE_PLANNER_AGENT_TYPE",
+    "EvidencePlanFreezer",
+    "EvidencePlanningError",
+    "ControlReproducer",
+    "CommandControlReproducer",
+    "DiagnosisReproductionRequest",
+    "DiagnosisRetryAction",
+    "DiagnosisRetryController",
+    "DiagnosisRetryDecision",
+    "DiagnosisRetryError",
+    "diagnosis_hypothesis_digest",
 ]

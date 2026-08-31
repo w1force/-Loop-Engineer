@@ -48,7 +48,22 @@ class SignalEnvelope(Contract):
     severity: Severity
     eligibility: Eligibility
     error_type: str | None = None
+    error_code: str | None = None
+    event_name: str | None = None
     message: str = ""
+    message_template: str | None = None
+    template_id: str | None = None
+    environment: str | None = None
+    deployment_version: str | None = None
+    instance_id: str | None = None
+    thread_id: str | None = None
+    task_id: str | None = None
+    logger: str | None = None
+    trace_id: str | None = None
+    request_id: str | None = None
+    run_id: str | None = None
+    session_id: str | None = None
+    erp: str | None = None
     original_input: Any = None
     evidence: dict[str, Any] = Field(default_factory=dict)
 

@@ -27,6 +27,7 @@ from .generation_skill import (
 from .models import (
     ARTICLE_MAX_VERIFICATION_ATTEMPTS,
     FrozenVerificationSkill,
+    ScenarioSpec,
     ScenarioAssertionContract,
     VerificationModel,
     VerificationPolicy,
@@ -101,14 +102,16 @@ class FailureSignature(VerificationModel):
 
     code: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
     error_type: str | None = Field(default=None, min_length=1)
-    message_pattern: str | None = Field(default=None, min_length=1)
+    message_pattern: str | None = Field(default=None, min_length=1, max_length=512)
     event_code: str | None = Field(default=None, min_length=1)
 
     @field_validator("message_pattern")
     @classmethod
     def _valid_pattern(cls, value: str | None) -> str | None:
         if value is not None:
-            re.compile(value)
+            compiled = re.compile(value)
+            if compiled.search("") is not None:
+                raise ValueError("message_pattern cannot match an empty string")
         return value
 
     @model_validator(mode="after")
@@ -133,6 +136,12 @@ class IncidentBundle(VerificationModel):
     control_ref: str = Field(min_length=1)
     original_input: Any
     failure_signature: FailureSignature
+    diagnosis_reproducer: Any | None = None
+    diagnosis_reproducer_digest: str | None = Field(
+        default=None, pattern=_SHA256.pattern
+    )
+    primary_signal_digest: str | None = Field(default=None, pattern=_SHA256.pattern)
+    evidence_bundle_digest: str | None = Field(default=None, pattern=_SHA256.pattern)
 
     @field_validator("incident_id")
     @classmethod
@@ -160,6 +169,18 @@ class IncidentBundle(VerificationModel):
             raise ValueError(
                 "every source location revision must match the frozen control_ref"
             )
+        if (self.diagnosis_reproducer is None) != (
+            self.diagnosis_reproducer_digest is None
+        ):
+            raise ValueError(
+                "diagnosis reproducer and its digest must be supplied together"
+            )
+        if (
+            self.diagnosis_reproducer is not None
+            and canonical_json_digest(self.diagnosis_reproducer)
+            != self.diagnosis_reproducer_digest
+        ):
+            raise ValueError("diagnosis reproducer digest mismatch")
         return self
 
     @property
@@ -775,7 +796,7 @@ class VerificationPlanFreezer:
             FrozenVerificationSkill(name=item.name, spec=item.spec, digest=item.digest)
             for item in skills
         )
-        command_scenario_entries = [
+        command_scenario_entries: list[tuple[str, str | None, ScenarioSpec]] = [
             (f"{item.name}:{scenario.id}", item.name, scenario)
             for item in skills
             for scenario in (*item.spec.integration, *item.spec.ui)

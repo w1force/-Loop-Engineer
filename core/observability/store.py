@@ -8,10 +8,11 @@ debug files without pretending that those lines carry a native Trace ID.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import base64
+import binascii
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ import time
 from typing import Any, Literal
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _DEBUG_LINE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s+"
     r"\[(?P<level>VERBOSE|DEBUG|INFO|WARN|ERROR)\]\s*(?P<message>.*)$"
@@ -35,6 +36,30 @@ _UUID = re.compile(
 )
 _HEX = re.compile(r"\b[0-9a-fA-F]{16,}\b")
 _NUMBER = re.compile(r"(?<![A-Za-z_])-?\d+(?:\.\d+)?")
+_IDENTITY_ALIASES = {
+    "trace_id": frozenset(
+        {"trace_id", "traceid", "trace.id", "log_traceid", "logtraceid"}
+    ),
+    "request_id": frozenset(
+        {
+            "request_id",
+            "requestid",
+            "request.id",
+            "log_requestid",
+            "logrequestid",
+        }
+    ),
+    "run_id": frozenset(
+        {"run_id", "runid", "run.id", "verification.run_id", "verification_run_id"}
+    ),
+    "session_id": frozenset(
+        {"session_id", "sessionid", "session.id"}
+    ),
+    "erp": frozenset(
+        {"erp", "enduser.id", "user.id", "user_id", "userid"}
+    ),
+}
+_IDENTITY_CHARACTER = r"A-Za-z0-9_.-"
 
 
 class ObservabilityStoreError(RuntimeError):
@@ -175,7 +200,7 @@ def _normalize_identifier(value: Any, expected_bytes: int) -> str:
         return raw.lower()
     try:
         decoded = base64.b64decode(raw, validate=True)
-    except (ValueError, base64.binascii.Error):
+    except (ValueError, binascii.Error):
         return ""
     return decoded.hex() if len(decoded) == expected_bytes else ""
 
@@ -185,6 +210,88 @@ def _message_template(message: str) -> str:
     normalized = _HEX.sub("<hex>", normalized)
     normalized = _NUMBER.sub("<n>", normalized)
     return re.sub(r"\s+", " ", normalized).strip()[:1000]
+
+
+def _log_index_fields(
+    *,
+    resource: Mapping[str, Any],
+    attributes: Mapping[str, Any],
+    service_name: str,
+    service_version: str | None,
+    event_name: Any,
+    diagnostic_message: str,
+) -> dict[str, str | None]:
+    """Derive the indexed projection shared by live ingest and migrations."""
+
+    environment = _nullable(
+        _lookup(
+            resource,
+            "deployment.environment.name",
+            "deployment.environment",
+            "environment",
+            "env",
+        )
+        or _lookup(attributes, "environment", "env")
+    )
+    deployment_version = _nullable(
+        _lookup(resource, "deployment.version", "deployment_version")
+        or _lookup(attributes, "deployment.version", "deployment_version")
+        or service_version
+    )
+    message_template = _message_template(diagnostic_message)
+    return {
+        "environment": environment,
+        "deployment_version": deployment_version,
+        "instance_id": _nullable(
+            _lookup(
+                resource,
+                "service.instance.id",
+                "k8s.pod.name",
+                "host.name",
+                "instance_id",
+            )
+            or _lookup(attributes, "service.instance.id", "instance_id")
+        ),
+        "thread_id": _nullable(
+            _lookup(attributes, "thread.id", "thread_id", "thread")
+        ),
+        "task_id": _nullable(_lookup(attributes, "task.id", "task_id", "task")),
+        "logger": _nullable(
+            _lookup(attributes, "logger.name", "logger_name", "logger")
+        ),
+        "request_id": _nullable(
+            _lookup(
+                attributes,
+                "request.id",
+                "request_id",
+                "requestId",
+                "requestid",
+                "log_requestid",
+            )
+            or _lookup(
+                resource,
+                "request.id",
+                "request_id",
+                "requestId",
+                "requestid",
+                "log_requestid",
+            )
+        ),
+        "erp": _nullable(
+            _lookup(attributes, "enduser.id", "user.id", "erp", "ERP")
+            or _lookup(resource, "enduser.id", "user.id", "erp", "ERP")
+        ),
+        "message_template": message_template,
+        "template_id": sha256(
+            _json(
+                {
+                    "service": service_name,
+                    "event_name": _nullable(event_name),
+                    "template": message_template,
+                }
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def _error_type(message: str, attributes: Mapping[str, Any]) -> str:
@@ -218,17 +325,17 @@ class LocalObservabilityStore:
 
     @staticmethod
     def _next_ingest_sequence(connection: sqlite3.Connection) -> int:
+        cursor = connection.execute(
+            "UPDATE otlp_ingest_clock SET sequence = sequence + 1 WHERE singleton = 1"
+        )
+        if cursor.rowcount != 1:
+            raise ObservabilityStoreError("OTLP ingest clock 未初始化")
         row = connection.execute(
             "SELECT sequence FROM otlp_ingest_clock WHERE singleton = 1"
         ).fetchone()
         if row is None:
             raise ObservabilityStoreError("OTLP ingest clock 未初始化")
-        sequence = int(row["sequence"]) + 1
-        connection.execute(
-            "UPDATE otlp_ingest_clock SET sequence = ? WHERE singleton = 1",
-            (sequence,),
-        )
-        return sequence
+        return int(row["sequence"])
 
     @staticmethod
     def _reject_if_late(
@@ -355,6 +462,14 @@ class LocalObservabilityStore:
                     body TEXT NOT NULL,
                     service_name TEXT NOT NULL,
                     service_version TEXT,
+                    environment TEXT,
+                    deployment_version TEXT,
+                    instance_id TEXT,
+                    thread_id TEXT,
+                    task_id TEXT,
+                    logger TEXT,
+                    request_id TEXT,
+                    erp TEXT,
                     session_id TEXT,
                     run_id TEXT,
                     cycle INTEGER,
@@ -366,6 +481,7 @@ class LocalObservabilityStore:
                     error_type TEXT,
                     event_code TEXT,
                     message_template TEXT,
+                    template_id TEXT,
                     business_frame TEXT,
                     attributes_json TEXT NOT NULL,
                     resource_json TEXT NOT NULL,
@@ -450,11 +566,13 @@ class LocalObservabilityStore:
                 """
             )
             rows = connection.execute("SELECT version FROM schema_meta").fetchall()
+            migrated_from_legacy = False
             if not rows:
                 connection.execute(
                     "INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,)
                 )
-            elif len(rows) == 1 and rows[0]["version"] in {1, 2, 3, 4}:
+            elif len(rows) == 1 and rows[0]["version"] in {1, 2, 3, 4, 5}:
+                migrated_from_legacy = True
                 columns = {
                     row["name"]
                     for row in connection.execute(
@@ -493,6 +611,22 @@ class LocalObservabilityStore:
                         connection.execute(
                             f"ALTER TABLE {table} ADD COLUMN collection_id TEXT"
                         )
+                    if table == "log_records":
+                        for column in (
+                            "environment",
+                            "deployment_version",
+                            "instance_id",
+                            "thread_id",
+                            "task_id",
+                            "logger",
+                            "request_id",
+                            "erp",
+                            "template_id",
+                        ):
+                            if column not in table_columns:
+                                connection.execute(
+                                    f"ALTER TABLE log_records ADD COLUMN {column} TEXT"
+                                )
                 barrier_columns = {
                     row["name"]
                     for row in connection.execute(
@@ -509,11 +643,10 @@ class LocalObservabilityStore:
                         "ALTER TABLE otlp_flush_barriers "
                         "ADD COLUMN last_late_at_ns INTEGER"
                     )
-                connection.execute(
-                    "UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,)
-                )
             elif len(rows) != 1 or rows[0]["version"] != SCHEMA_VERSION:
                 raise ObservabilityStoreError("不支持的 observability schema 版本")
+            if migrated_from_legacy:
+                self._backfill_log_index_fields(connection)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS trace_spans_collection_idx "
                 "ON trace_spans(collection_id, ingest_sequence)"
@@ -521,6 +654,165 @@ class LocalObservabilityStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS log_records_collection_idx "
                 "ON log_records(collection_id, ingest_sequence)"
+            )
+            connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS log_records_request_idx
+                ON log_records(request_id, timestamp_ns);
+                CREATE INDEX IF NOT EXISTS log_records_run_idx
+                ON log_records(run_id, timestamp_ns);
+                CREATE INDEX IF NOT EXISTS log_records_erp_idx
+                ON log_records(erp, timestamp_ns);
+                CREATE INDEX IF NOT EXISTS log_records_template_idx
+                ON log_records(template_id, timestamp_ns);
+                CREATE INDEX IF NOT EXISTS log_records_service_time_idx
+                ON log_records(service_name, timestamp_ns);
+                CREATE INDEX IF NOT EXISTS log_records_scope_idx
+                ON log_records(
+                    service_name, environment, deployment_version,
+                    instance_id, timestamp_ns
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS log_records_fts USING fts5(
+                    observation_id UNINDEXED,
+                    body,
+                    message_template,
+                    event_name,
+                    error_type,
+                    event_code,
+                    logger,
+                    tokenize = 'unicode61'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS log_records_fts_insert
+                AFTER INSERT ON log_records BEGIN
+                    INSERT INTO log_records_fts(
+                        observation_id, body, message_template, event_name,
+                        error_type, event_code, logger
+                    ) VALUES (
+                        new.observation_id, new.body, coalesce(new.message_template, ''),
+                        coalesce(new.event_name, ''), coalesce(new.error_type, ''),
+                        coalesce(new.event_code, ''), coalesce(new.logger, '')
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS log_records_fts_delete
+                AFTER DELETE ON log_records BEGIN
+                    DELETE FROM log_records_fts
+                    WHERE observation_id = old.observation_id;
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS log_records_fts_update
+                AFTER UPDATE ON log_records BEGIN
+                    DELETE FROM log_records_fts
+                    WHERE observation_id = old.observation_id;
+                    INSERT INTO log_records_fts(
+                        observation_id, body, message_template, event_name,
+                        error_type, event_code, logger
+                    ) VALUES (
+                        new.observation_id, new.body, coalesce(new.message_template, ''),
+                        coalesce(new.event_name, ''), coalesce(new.error_type, ''),
+                        coalesce(new.event_code, ''), coalesce(new.logger, '')
+                    );
+                END;
+                """
+            )
+            if migrated_from_legacy:
+                connection.execute(
+                    "UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,)
+                )
+            connection.execute(
+                """
+                INSERT INTO log_records_fts(
+                    observation_id, body, message_template, event_name,
+                    error_type, event_code, logger
+                )
+                SELECT records.observation_id, records.body,
+                       coalesce(records.message_template, ''),
+                       coalesce(records.event_name, ''),
+                       coalesce(records.error_type, ''),
+                       coalesce(records.event_code, ''),
+                       coalesce(records.logger, '')
+                FROM log_records AS records
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM log_records_fts AS indexed
+                    WHERE indexed.observation_id = records.observation_id
+                )
+                """
+            )
+
+    @staticmethod
+    def _backfill_log_index_fields(connection: sqlite3.Connection) -> None:
+        """Populate v6 structured columns from immutable v1-v5 JSON payloads."""
+
+        cursor = connection.execute(
+            """
+            SELECT observation_id, body, service_name, service_version, event_name,
+                   message_template, environment, deployment_version, instance_id,
+                   thread_id, task_id, logger, request_id, erp, template_id,
+                   attributes_json, resource_json
+            FROM log_records
+            """
+        )
+        while rows := cursor.fetchmany(500):
+            updates: list[tuple[Any, ...]] = []
+            for row in rows:
+                try:
+                    attributes = json.loads(row["attributes_json"] or "{}")
+                    resource = json.loads(row["resource_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    attributes, resource = {}, {}
+                if not isinstance(attributes, Mapping):
+                    attributes = {}
+                if not isinstance(resource, Mapping):
+                    resource = {}
+                diagnostic_message = str(
+                    _lookup(attributes, "error", "exception.message")
+                    or row["body"]
+                    or ""
+                )
+                derived = _log_index_fields(
+                    resource=resource,
+                    attributes=attributes,
+                    service_name=str(row["service_name"] or "claude-code"),
+                    service_version=_nullable(row["service_version"]),
+                    event_name=row["event_name"],
+                    diagnostic_message=diagnostic_message,
+                )
+                message_template = row["message_template"] or derived["message_template"]
+                template_id = row["template_id"] or sha256(
+                    _json(
+                        {
+                            "service": str(row["service_name"] or "claude-code"),
+                            "event_name": _nullable(row["event_name"]),
+                            "template": message_template,
+                        }
+                    ).encode("utf-8")
+                ).hexdigest()
+                updates.append(
+                    (
+                        row["environment"] or derived["environment"],
+                        row["deployment_version"] or derived["deployment_version"],
+                        row["instance_id"] or derived["instance_id"],
+                        row["thread_id"] or derived["thread_id"],
+                        row["task_id"] or derived["task_id"],
+                        row["logger"] or derived["logger"],
+                        row["request_id"] or derived["request_id"],
+                        row["erp"] or derived["erp"],
+                        message_template,
+                        template_id,
+                        row["observation_id"],
+                    )
+                )
+            connection.executemany(
+                """
+                UPDATE log_records
+                SET environment = ?, deployment_version = ?, instance_id = ?,
+                    thread_id = ?, task_id = ?, logger = ?, request_id = ?, erp = ?,
+                    message_template = ?, template_id = ?
+                WHERE observation_id = ?
+                """,
+                updates,
             )
 
     def ingest_otlp_traces(self, payload: Mapping[str, Any]) -> int:
@@ -679,16 +971,31 @@ class LocalObservabilityStore:
             if severity_text in {"ERROR", "FATAL"}
             else None
         )
+        service_name = str(_lookup(resource, "service.name") or "claude-code")
+        service_version = _nullable(_lookup(resource, "service.version"))
+        index_fields = _log_index_fields(
+            resource=resource,
+            attributes=attributes,
+            service_name=service_name,
+            service_version=service_version,
+            event_name=event_name,
+            diagnostic_message=diagnostic_message,
+        )
         return connection.execute(
             """
             INSERT OR IGNORE INTO log_records(
                 observation_id, timestamp_ns, observed_time_ns, trace_id,
                 span_id, severity_number, severity_text, body, service_name,
-                service_version, session_id, run_id, cycle, scenario_id, variant,
+                service_version, environment, deployment_version, instance_id,
+                thread_id, task_id, logger, request_id, erp, session_id,
+                run_id, cycle, scenario_id, variant,
                 input_digest, collection_id, event_name, error_type, event_code,
-                message_template, business_frame, attributes_json,
+                message_template, template_id, business_frame, attributes_json,
                 resource_json, raw_json, source, received_at, ingest_sequence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 observation_id,
@@ -699,8 +1006,16 @@ class LocalObservabilityStore:
                 severity_number,
                 severity_text,
                 body,
-                str(_lookup(resource, "service.name") or "claude-code"),
-                _nullable(_lookup(resource, "service.version")),
+                service_name,
+                service_version,
+                index_fields["environment"],
+                index_fields["deployment_version"],
+                index_fields["instance_id"],
+                index_fields["thread_id"],
+                index_fields["task_id"],
+                index_fields["logger"],
+                index_fields["request_id"],
+                index_fields["erp"],
                 _nullable(_lookup(attributes, "session.id") or _lookup(resource, "session.id")),
                 _nullable(_lookup(resource, "verification.run_id", "verification_run_id")),
                 _positive_integer_or_none(
@@ -719,7 +1034,8 @@ class LocalObservabilityStore:
                 _nullable(event_name),
                 _nullable(error_type),
                 _nullable(_lookup(attributes, "event.code", "event_code")),
-                _message_template(diagnostic_message),
+                index_fields["message_template"],
+                index_fields["template_id"],
                 _nullable(_lookup(attributes, "code.filepath", "business_frame")),
                 _json(attributes),
                 _json(resource),
@@ -1103,11 +1419,22 @@ class LocalObservabilityStore:
         self,
         *,
         trace_id: str | None = None,
+        request_id: str | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        erp: str | None = None,
         scenario_id: str | None = None,
         variant: str | None = None,
         service_name: str | None = None,
+        environment: str | None = None,
+        deployment_version: str | None = None,
+        instance_id: str | None = None,
+        thread_id: str | None = None,
+        task_id: str | None = None,
+        logger: str | None = None,
+        template_id: str | None = None,
+        event_name: str | None = None,
+        event_code: str | None = None,
         level: str | None = None,
         start_time_ns: int | None = None,
         end_time_ns: int | None = None,
@@ -1135,11 +1462,22 @@ class LocalObservabilityStore:
         params: list[Any] = []
         for column, value in (
             ("trace_id", trace_id),
+            ("request_id", request_id),
             ("session_id", session_id),
             ("run_id", run_id),
+            ("erp", erp),
             ("scenario_id", scenario_id),
             ("variant", variant),
             ("service_name", service_name),
+            ("environment", environment),
+            ("deployment_version", deployment_version),
+            ("instance_id", instance_id),
+            ("thread_id", thread_id),
+            ("task_id", task_id),
+            ("logger", logger),
+            ("template_id", template_id),
+            ("event_name", event_name),
+            ("event_code", event_code),
         ):
             if value:
                 clauses.append(f"{column} = ?")
@@ -1162,6 +1500,292 @@ class LocalObservabilityStore:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def search_logs_exact(
+        self,
+        *,
+        identity_field: Literal[
+            "trace_id", "request_id", "run_id", "session_id", "erp"
+        ],
+        identity_value: str,
+        service_name: str,
+        start_time_ns: int,
+        end_time_ns: int,
+        anchor_time_ns: int | None = None,
+        environment: str | None = None,
+        deployment_version: str | None = None,
+        instance_id: str | None = None,
+        thread_id: str | None = None,
+        task_id: str | None = None,
+        logger: str | None = None,
+        level: str | None = None,
+        template_id: str | None = None,
+        event_name: str | None = None,
+        event_code: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Deterministic ID + time + template metadata lookup.
+
+        This is the normal diagnosis path once a correlation ID is known.  It does
+        not consult FTS or a relevance score, so a fuzzy result can never displace
+        the frozen primary signal.
+        """
+
+        if identity_field not in {
+            "trace_id",
+            "request_id",
+            "run_id",
+            "session_id",
+            "erp",
+        }:
+            raise ObservabilityStoreError("unsupported correlation identity")
+        identity_value = str(identity_value).strip()
+        if not identity_value:
+            raise ObservabilityStoreError("identity_value cannot be blank")
+        if not 1 <= limit <= 1000:
+            raise ObservabilityStoreError("limit 必须在 1..1000")
+        if (
+            isinstance(start_time_ns, bool)
+            or isinstance(end_time_ns, bool)
+            or not isinstance(start_time_ns, int)
+            or not isinstance(end_time_ns, int)
+            or start_time_ns < 0
+            or end_time_ns < start_time_ns
+        ):
+            raise ObservabilityStoreError("精确查询必须提供有效时间范围")
+        if anchor_time_ns is None:
+            anchor_time_ns = start_time_ns + (end_time_ns - start_time_ns) // 2
+        if (
+            isinstance(anchor_time_ns, bool)
+            or not isinstance(anchor_time_ns, int)
+            or not start_time_ns <= anchor_time_ns <= end_time_ns
+        ):
+            raise ObservabilityStoreError("anchor_time_ns 必须位于查询时间范围内")
+        clauses = [
+            "service_name = ?",
+            "timestamp_ns BETWEEN ? AND ?",
+            # Diagnosis evidence is scoped exactly like incident correlation.
+            # A missing environment/version is an explicit unknown scope, not a
+            # wildcard that may pull evidence from another deployment.
+            "environment IS ?",
+            "deployment_version IS ?",
+        ]
+        params: list[Any] = [
+            service_name,
+            start_time_ns,
+            end_time_ns,
+            environment,
+            deployment_version,
+        ]
+        for column, value in (
+            ("instance_id", instance_id),
+            ("thread_id", thread_id),
+            ("task_id", task_id),
+            ("logger", logger),
+            ("template_id", template_id),
+            ("event_name", event_name),
+            ("event_code", event_code),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if level:
+            clauses.append("severity_text = ?")
+            params.append(level.upper())
+        with self._connect() as connection:
+            structured = connection.execute(
+                "SELECT * FROM log_records WHERE "
+                + " AND ".join(clauses)
+                + f" AND {identity_field} = ?"
+                + " ORDER BY ABS(timestamp_ns - ?), timestamp_ns, observation_id LIMIT ?",
+                (*params, identity_value, anchor_time_ns, limit),
+            ).fetchall()
+            remaining = max(0, limit - len(structured))
+            candidate_limit = min(5000, max(remaining * 10, remaining))
+            textual = (
+                connection.execute(
+                    "SELECT * FROM log_records WHERE "
+                    + " AND ".join(clauses)
+                    + f" AND {identity_field} IS NULL"
+                    + " AND (instr(body, ?) > 0 OR instr(attributes_json, ?) > 0"
+                    + " OR instr(resource_json, ?) > 0)"
+                    + " ORDER BY ABS(timestamp_ns - ?), timestamp_ns, observation_id"
+                    + " LIMIT ?",
+                    (
+                        *params,
+                        identity_value,
+                        identity_value,
+                        identity_value,
+                        anchor_time_ns,
+                        candidate_limit,
+                    ),
+                ).fetchall()
+                if remaining
+                else []
+            )
+        textual = [
+            row
+            for row in textual
+            if _row_contains_identity(row, identity_field, identity_value)
+        ][:remaining]
+        rows = sorted(
+            (*structured, *textual),
+            key=lambda row: (
+                abs(int(row["timestamp_ns"]) - anchor_time_ns),
+                row["timestamp_ns"],
+                row["observation_id"],
+            ),
+        )
+        return [dict(row) for row in rows[:limit]]
+
+    def search_logs_bm25(
+        self,
+        *,
+        terms: tuple[str, ...],
+        service_name: str,
+        start_time_ns: int,
+        end_time_ns: int,
+        environment: str | None = None,
+        deployment_version: str | None = None,
+        instance_id: str | None = None,
+        thread_id: str | None = None,
+        task_id: str | None = None,
+        erp: str | None = None,
+        logger: str | None = None,
+        level: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """BM25 fallback over an already bounded physical candidate set."""
+
+        if not 1 <= limit <= 200:
+            raise ObservabilityStoreError("BM25 limit 必须在 1..200")
+        if (
+            isinstance(start_time_ns, bool)
+            or isinstance(end_time_ns, bool)
+            or not isinstance(start_time_ns, int)
+            or not isinstance(end_time_ns, int)
+            or start_time_ns < 0
+            or end_time_ns < start_time_ns
+        ):
+            raise ObservabilityStoreError("BM25 查询必须提供有效时间范围")
+        service_name = str(service_name).strip()
+        if not service_name:
+            raise ObservabilityStoreError("BM25 查询必须限定 service_name")
+        normalized_terms = tuple(
+            dict.fromkeys(
+                term.strip().lower()
+                for term in terms
+                if isinstance(term, str) and term.strip()
+            )
+        )
+        if not normalized_terms:
+            return []
+        if len(normalized_terms) > 32:
+            raise ObservabilityStoreError("BM25 terms cannot exceed 32")
+        for term in normalized_terms:
+            if len(term) > 128 or any(char in term for char in ('"', "\x00")):
+                raise ObservabilityStoreError("unsafe BM25 term")
+        fts_query = " OR ".join(f'"{term}"' for term in normalized_terms)
+        clauses = [
+            "records.service_name = ?",
+            "records.timestamp_ns BETWEEN ? AND ?",
+            "records.environment IS ?",
+            "records.deployment_version IS ?",
+        ]
+        params: list[Any] = [
+            service_name,
+            start_time_ns,
+            end_time_ns,
+            environment,
+            deployment_version,
+        ]
+        for column, value in (
+            ("instance_id", instance_id),
+            ("thread_id", thread_id),
+            ("task_id", task_id),
+            ("erp", erp),
+            ("logger", logger),
+        ):
+            if value:
+                clauses.append(f"records.{column} = ?")
+                params.append(value)
+        if level:
+            clauses.append("records.severity_text = ?")
+            params.append(level.upper())
+        params.extend((fts_query, limit))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT records.*,
+                       bm25(log_records_fts, 0.0, 3.0, 4.0, 2.0, 3.0, 3.0, 1.0)
+                           AS bm25_rank
+                FROM log_records_fts
+                JOIN log_records AS records
+                  ON records.observation_id = log_records_fts.observation_id
+                WHERE """
+                + " AND ".join(clauses)
+                + " AND log_records_fts MATCH ?"
+                + " ORDER BY bm25_rank, records.timestamp_ns, records.observation_id"
+                + " LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def _row_contains_identity(
+    row: Mapping[str, Any], identity_field: str, identity_value: str
+) -> bool:
+    """Confirm a textual fallback candidate without substring collisions.
+
+    Indexed identity columns are preferred.  Legacy rows may only contain the
+    identity in JSON or free text, so JSON accepts only a known identity key with
+    an exact scalar value, while plain text requires identifier boundaries.  This
+    prevents values such as ``req-1`` from matching ``req-10``.
+    """
+
+    aliases = _IDENTITY_ALIASES.get(identity_field)
+    if aliases is None:
+        return False
+
+    def scalar_matches(value: Any) -> bool:
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            candidate = str(value).strip()
+            if identity_field == "trace_id":
+                return candidate.casefold() == identity_value.casefold()
+            return candidate == identity_value
+        return False
+
+    def json_contains(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                normalized_key = str(key).strip().casefold()
+                if normalized_key in aliases and scalar_matches(child):
+                    return True
+                if isinstance(child, (Mapping, list, tuple)) and json_contains(child):
+                    return True
+        elif isinstance(value, (list, tuple)):
+            return any(json_contains(child) for child in value)
+        return False
+
+    for column in ("attributes_json", "resource_json"):
+        raw = row[column] if column in row.keys() else None
+        if not raw:
+            continue
+        try:
+            decoded = json.loads(str(raw))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if json_contains(decoded):
+            return True
+
+    body = str(row["body"] if "body" in row.keys() else "")
+    flags = re.IGNORECASE if identity_field == "trace_id" else 0
+    pattern = (
+        rf"(?<![{_IDENTITY_CHARACTER}])"
+        + re.escape(identity_value)
+        + rf"(?![{_IDENTITY_CHARACTER}])"
+    )
+    return re.search(pattern, body, flags) is not None
 
 
 def _nullable(value: Any) -> str | None:

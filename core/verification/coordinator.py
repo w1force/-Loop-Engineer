@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from pydantic import Field, StrictInt, field_validator, model_validator
@@ -31,7 +31,6 @@ from .runner import readonly_workspace_digest, workspace_digest
 from .replay import DockerReplayLauncher
 from .store import AttestedJsonEvidenceStore
 from .workflow import (
-    CandidateSnapshot,
     IncidentBundle,
     LightweightVerificationRequest,
     LightweightVerificationResult,
@@ -45,6 +44,9 @@ from .workflow import (
     canonical_json_digest,
     capture_candidate_snapshot,
 )
+
+if TYPE_CHECKING:
+    from core.orchestrator.router import FailureRouter
 
 
 class RepairAgent(Protocol):
@@ -99,6 +101,8 @@ class CoordinatorStatus(str, Enum):
     VERIFIED = "verified"
     RELEASED = "released"
     RELEASE_BLOCKED = "release_blocked"
+    REDIAGNOSIS_REQUIRED = "rediagnosis_required"
+    NO_ACTION = "no_action"
     ESCALATED = "escalated"
 
 
@@ -177,7 +181,23 @@ class CoordinatorOutcome(VerificationModel):
     evidence_location: str | None = None
     release_reference: str | None = None
     escalation_reference: str | None = None
+    candidate_ref: str | None = None
+    candidate_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    failure_owner: str | None = None
+    next_action: str | None = None
     failures: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _candidate_binding_matches_status(self):
+        if (self.candidate_ref is None) != (self.candidate_digest is None):
+            raise ValueError("candidate_ref and candidate_digest must be supplied together")
+        if self.status in {
+            CoordinatorStatus.VERIFIED,
+            CoordinatorStatus.RELEASED,
+            CoordinatorStatus.RELEASE_BLOCKED,
+        } and self.candidate_ref is None:
+            raise ValueError("verified/release outcomes require a candidate binding")
+        return self
 
 
 class VerifiedReleaseRequest(VerificationModel):
@@ -428,7 +448,7 @@ class VerificationCoordinator:
             raise TypeError("Coordinator only accepts the built-in VerificationEngine")
         if type(evidence_store) is not AttestedJsonEvidenceStore:
             raise TypeError("Coordinator requires AttestedJsonEvidenceStore")
-        if type(replay_launcher) is not DockerReplayLauncher:
+        if replay_launcher.__class__ is not DockerReplayLauncher:
             raise TypeError("Coordinator only accepts the built-in DockerReplayLauncher")
         if engine.policy.digest != plan_freezer.policy.digest:
             raise ValueError("engine and plan freezer policy differ")
@@ -681,6 +701,8 @@ class VerificationCoordinator:
                         status=CoordinatorStatus.VERIFIED,
                         cycle=cycle,
                         evidence_location=latest_evidence,
+                        candidate_ref=plan.candidate_ref,
+                        candidate_digest=plan.candidate_digest,
                     )
                 try:
                     release_reference = await release_action.release_verified(
@@ -710,6 +732,8 @@ class VerificationCoordinator:
                         status=CoordinatorStatus.RELEASE_BLOCKED,
                         cycle=cycle,
                         evidence_location=latest_evidence,
+                        candidate_ref=plan.candidate_ref,
+                        candidate_digest=plan.candidate_digest,
                         failures=(failure,),
                     )
                 state = state.model_copy(
@@ -726,6 +750,8 @@ class VerificationCoordinator:
                     cycle=cycle,
                     evidence_location=latest_evidence,
                     release_reference=release_reference,
+                    candidate_ref=plan.candidate_ref,
+                    candidate_digest=plan.candidate_digest,
                 )
             except Exception as exc:
                 exc_findings = (classify_exception(exc, stage=StageName.VERIFICATION),)
@@ -763,10 +789,10 @@ class VerificationCoordinator:
     ) -> tuple[CoordinatorState, tuple[str, ...], CoordinatorOutcome | None]:
         """Route a cycle's structured failures.
 
-        Only an ``owner == REPAIR`` governing failure feeds the next repair round;
-        every other owner (infrastructure/policy/integrity/observability/diagnosis)
-        is terminal for this run and escalates immediately, instead of silently
-        consuming repair rounds as the old catch-all did. Returns
+        Only an ``owner == REPAIR`` governing failure feeds the next repair round.
+        Diagnosis failures return a machine-routable REDIAGNOSIS_REQUIRED outcome;
+        other non-repair owners terminate or escalate instead of silently consuming
+        repair rounds as the old catch-all did. Returns
         ``(state, repair_feedback, outcome)`` — a non-None outcome means return it,
         otherwise ``continue`` with ``repair_feedback`` as the next round's input.
         """
@@ -786,6 +812,21 @@ class VerificationCoordinator:
                 or summaries
             )
             return state, repair_feedback, None
+        if decision.next_action is NextAction.REDIAGNOSE:
+            state = state.model_copy(
+                update={"status": CoordinatorStatus.REDIAGNOSIS_REQUIRED}
+            )
+            self.state_store.save(state)
+            return state, (), CoordinatorOutcome(
+                run_id=request.run_id,
+                incident_id=request.incident.incident_id,
+                status=CoordinatorStatus.REDIAGNOSIS_REQUIRED,
+                cycle=cycle,
+                evidence_location=latest_evidence,
+                failure_owner=decision.owner.value,
+                next_action=decision.next_action.value,
+                failures=(decision.reason,) + summaries,
+            )
         outcome = await self._escalate(
             state=state,
             request=request,
@@ -797,6 +838,8 @@ class VerificationCoordinator:
             escalation_handler=escalation_handler,
             cycle=cycle,
             latest_evidence=latest_evidence,
+            failure_owner=decision.owner.value,
+            next_action=decision.next_action.value,
         )
         return state, (), outcome
 
@@ -809,6 +852,8 @@ class VerificationCoordinator:
         escalation_handler: "EscalationHandler | None",
         cycle: int,
         latest_evidence: str | None,
+        failure_owner: str | None = None,
+        next_action: str | None = None,
     ) -> CoordinatorOutcome:
         escalation = HumanEscalation(
             run_id=request.run_id,
@@ -833,6 +878,8 @@ class VerificationCoordinator:
             cycle=cycle,
             evidence_location=latest_evidence,
             escalation_reference=escalation_reference,
+            failure_owner=failure_owner,
+            next_action=next_action,
             failures=escalation.failures,
         )
 

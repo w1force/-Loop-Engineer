@@ -543,7 +543,9 @@ async def test_replay_failure_is_a_hard_block_and_never_calls_engine_or_release(
         release_action=release,
     )
 
-    assert outcome.status is CoordinatorStatus.ESCALATED
+    assert outcome.status is CoordinatorStatus.REDIAGNOSIS_REQUIRED
+    assert outcome.failure_owner == "diagnosis"
+    assert outcome.next_action == "rediagnose"
     assert len(replay.calls) == 1
     assert engine_calls == 0
     assert not release.calls

@@ -74,6 +74,15 @@ what additional log, Trace, or metric you would need rather than speculating. Do
 present a hypothesis as a confirmed fact, and do not manufacture a reproducer you
 have not grounded in evidence.
 
+When `SIGNAL_JSON.evidence_context` is present, use that frozen, bounded bundle
+instead of performing an unbounded log scan. Its entries are ordered by evidence
+priority, not by truth. `collection_incomplete` means absence is unknown, never that
+the event did not happen. `context_omitted` means a match exists but its body could
+not fit the bounded prompt; do not treat it as absent. If `previous_attempts` is
+non-empty, address their failed reproduction evidence and produce a materially
+different source-backed hypothesis; repeating the same hypothesis is rejected by
+the controller.
+
 ## Output contract
 
 End your run by emitting exactly ONE JSON object — a `DiagnosisProposal`. No prose
@@ -96,14 +105,24 @@ Fields:
   number, "end_line": number (optional), "revision": string }`, all on the frozen
   control ref.
 - `root_cause` (string): the `[fact] → [reasoning] → [conclusion]` chain, one place.
-- `reproducer` (object or null): how to reproduce (inputs, steps, expected failing
-  behavior); `null` if you could not establish one.
+- `reproducer` (object or null): a machine-executable argv contract, or `null` if
+  evidence cannot establish one. Shape: `{ "schema_version":
+  "diagnosis-reproducer/v1", "id": string, "argv": string[], "cwd": string,
+  "timeout_ms": integer, "expected_exit_code": integer, "stdout_contains":
+  string[], "stderr_contains": string[] }`. `argv` is never a shell string. Point
+  it at an existing repository test/harness or a named package task; do not use
+  shell entrypoints, interpreter inline flags (`python -c`, `node -e`) or wrapper
+  equivalents (`uv run python -c`, `npx node -e`).
 - `original_input` (JSON): the failing input, captured verbatim as structured JSON.
 - `failure_signature` (object): `{ "code": string, "error_type"?: string,
   "message_pattern"?: string, "event_code"?: string }`. Include at least one matcher
   besides `code`, so the signature is a structured matcher and not just a label.
 - `missing_evidence` (array of string): required evidence you could not obtain.
 - `unresolved_unknowns` (array of string): open questions the next stage must weigh.
+- `evidence_bundle_digest` (string or null): when `SIGNAL_JSON.evidence_context`
+  exists, copy its computed digest exactly to bind this proposal to that frozen
+  evidence bundle; otherwise emit `null`. `collection_incomplete` or `not_found`
+  is a data-quality fact, never proof that an event did not occur.
 
 If a field is genuinely empty, emit an empty array or `null` rather than omitting it.
 Emit the object once, as the final thing in your run, with no fences.

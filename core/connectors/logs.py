@@ -16,8 +16,9 @@ is the structured discovery feed that carries actionable Agent/MCP error semanti
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -35,9 +36,15 @@ class LogRecord:
     kind: str
     payload: dict[str, Any]
     raw: dict[str, Any]
+    # Stable for one physical file generation.  It prevents a rotated file whose
+    # first record has the same byte offset/content shape from reusing an old
+    # signal id.  The default preserves compatibility with custom adapters.
+    source_generation: str = ""
 
 
-def default_run_log_adapter(obj: dict[str, Any], *, source_id: str, line_offset: int) -> LogRecord | None:
+def default_run_log_adapter(
+    obj: dict[str, Any], *, source_id: str, line_offset: int
+) -> LogRecord | None:
     """Map one FileTracer JSONL object to a LogRecord. Returns None to skip a line."""
 
     kind = obj.get("kind")
@@ -82,21 +89,23 @@ class JsonlRunLogConnector:
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             return []
-        st = source.stat()
-        cursor = self.state.get_cursor(self.source_id)
-        offset = 0
-        if (
-            cursor is not None
-            and cursor["path"] == str(source)
-            and cursor["inode"] == st.st_ino
-            and st.st_size >= cursor["byte_offset"]
-        ):
-            offset = cursor["byte_offset"]
-        # else: new file / rotation (inode change) / truncation -> restart at 0
-
         records: list[LogRecord] = []
-        new_offset = offset
         with source.open("rb") as handle:
+            # Use the descriptor we actually read, rather than a path stat that can
+            # race with rename-based rotation between stat() and open().
+            st = os.fstat(handle.fileno())
+            generation = f"{st.st_dev}:{st.st_ino}"
+            cursor = self.state.get_cursor(self.source_id)
+            offset = 0
+            if (
+                cursor is not None
+                and cursor["path"] == str(source)
+                and cursor["inode"] == st.st_ino
+                and st.st_size >= cursor["byte_offset"]
+            ):
+                offset = cursor["byte_offset"]
+            # else: new file / rotation (inode change) / truncation -> restart at 0
+            new_offset = offset
             handle.seek(offset)
             for raw_line in handle:
                 if not raw_line.endswith(b"\n"):
@@ -119,7 +128,7 @@ class JsonlRunLogConnector:
                     obj, source_id=self.source_id, line_offset=line_offset
                 )
                 if record is not None:
-                    records.append(record)
+                    records.append(replace(record, source_generation=generation))
 
         self.state.set_cursor(
             self.source_id, path=str(source), inode=st.st_ino, byte_offset=new_offset

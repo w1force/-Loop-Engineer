@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
+import sqlite3
 import time
 
 import pytest
@@ -501,6 +504,257 @@ def test_log_search_rejects_invalid_window_and_variant(tmp_path: Path) -> None:
         store.search_logs(variant="production")
     with pytest.raises(Exception, match="不能早于"):
         store.search_logs(start_time_ns=2, end_time_ns=1)
+
+
+def _diagnosis_log_payload(
+    *,
+    body: str,
+    timestamp_ns: int,
+    request_id: str | None = None,
+    environment: str | None = "prod",
+    deployment_version: str | None = "v1",
+):
+    attributes = [_attr("logger.name", "order.chain")]
+    if request_id is not None:
+        attributes.append(_attr("request.id", request_id))
+    resource_attributes = [_attr("service.name", "order-api")]
+    if environment is not None:
+        resource_attributes.append(
+            _attr("deployment.environment.name", environment)
+        )
+    if deployment_version is not None:
+        resource_attributes.append(_attr("deployment.version", deployment_version))
+    return {
+        "resourceLogs": [
+            {
+                "resource": {"attributes": resource_attributes},
+                "scopeLogs": [
+                    {
+                        "logRecords": [
+                            {
+                                "timeUnixNano": str(timestamp_ns),
+                                "observedTimeUnixNano": str(timestamp_ns),
+                                "severityText": "ERROR",
+                                "body": {"stringValue": body},
+                                "attributes": attributes,
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_exact_identity_fallback_has_boundaries_and_nearest_first(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    anchor = 1_000_000
+    store.ingest_otlp_logs(
+        _diagnosis_log_payload(body="request_id=req-10", timestamp_ns=anchor - 1)
+    )
+    store.ingest_otlp_logs(
+        _diagnosis_log_payload(body="request_id=req-1", timestamp_ns=anchor + 100)
+    )
+    store.ingest_otlp_logs(
+        _diagnosis_log_payload(
+            body="structured req-1", timestamp_ns=anchor + 5, request_id="req-1"
+        )
+    )
+
+    rows = store.search_logs_exact(
+        identity_field="request_id",
+        identity_value="req-1",
+        service_name="order-api",
+        start_time_ns=anchor - 200,
+        end_time_ns=anchor + 200,
+        anchor_time_ns=anchor,
+        environment="prod",
+        deployment_version="v1",
+        logger="order.chain",
+    )
+
+    assert [row["timestamp_ns"] for row in rows] == [anchor + 5, anchor + 100]
+    assert all("req-10" not in row["body"] for row in rows)
+
+
+def test_exact_identity_json_fallback_requires_a_known_field(tmp_path: Path) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    trace_id = "ab" * 16
+    accepted = _diagnosis_log_payload(body="accepted", timestamp_ns=100)
+    accepted["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0][
+        "attributes"
+    ].append(_attr("traceId", trace_id))
+    rejected = _diagnosis_log_payload(body="rejected", timestamp_ns=101)
+    rejected["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0][
+        "attributes"
+    ].append(_attr("diagnostic.note", trace_id))
+    store.ingest_otlp_logs(accepted)
+    store.ingest_otlp_logs(rejected)
+
+    rows = store.search_logs_exact(
+        identity_field="trace_id",
+        identity_value=trace_id,
+        service_name="order-api",
+        start_time_ns=0,
+        end_time_ns=200,
+        anchor_time_ns=100,
+        environment="prod",
+        deployment_version="v1",
+        logger="order.chain",
+    )
+
+    assert [row["body"] for row in rows] == ["accepted"]
+
+
+def test_diagnosis_search_treats_missing_scope_as_exact_unknown(tmp_path: Path) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+    store.ingest_otlp_logs(
+        _diagnosis_log_payload(
+            body="dependency timeout req-null",
+            timestamp_ns=100,
+            request_id="req-null",
+            environment=None,
+            deployment_version=None,
+        )
+    )
+    store.ingest_otlp_logs(
+        _diagnosis_log_payload(
+            body="dependency timeout req-null",
+            timestamp_ns=101,
+            request_id="req-null",
+            environment="prod",
+            deployment_version="v1",
+        )
+    )
+
+    exact = store.search_logs_exact(
+        identity_field="request_id",
+        identity_value="req-null",
+        service_name="order-api",
+        start_time_ns=0,
+        end_time_ns=200,
+        anchor_time_ns=100,
+        environment=None,
+        deployment_version=None,
+        logger="order.chain",
+    )
+    fuzzy = store.search_logs_bm25(
+        terms=("dependency", "timeout"),
+        service_name="order-api",
+        start_time_ns=0,
+        end_time_ns=200,
+        environment=None,
+        deployment_version=None,
+        logger="order.chain",
+    )
+
+    assert [row["timestamp_ns"] for row in exact] == [100]
+    assert [row["timestamp_ns"] for row in fuzzy] == [100]
+
+
+def test_v5_log_schema_migrates_structured_index_fields_once(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-observability.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_meta(version INTEGER NOT NULL);
+            INSERT INTO schema_meta(version) VALUES (5);
+            CREATE TABLE log_records (
+                observation_id TEXT PRIMARY KEY,
+                timestamp_ns INTEGER NOT NULL,
+                observed_time_ns INTEGER NOT NULL,
+                trace_id TEXT,
+                span_id TEXT,
+                severity_number INTEGER,
+                severity_text TEXT NOT NULL,
+                body TEXT NOT NULL,
+                service_name TEXT NOT NULL,
+                service_version TEXT,
+                session_id TEXT,
+                run_id TEXT,
+                cycle INTEGER,
+                scenario_id TEXT,
+                variant TEXT,
+                input_digest TEXT,
+                collection_id TEXT,
+                event_name TEXT,
+                error_type TEXT,
+                event_code TEXT,
+                message_template TEXT,
+                business_frame TEXT,
+                attributes_json TEXT NOT NULL,
+                resource_json TEXT NOT NULL,
+                raw_json TEXT NOT NULL,
+                source TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                ingest_sequence INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO log_records(
+                observation_id, timestamp_ns, observed_time_ns, severity_number,
+                severity_text, body, service_name, service_version,
+                attributes_json, resource_json, raw_json, source, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-1",
+                100,
+                100,
+                17,
+                "ERROR",
+                "legacy request req-legacy failed",
+                "order-api",
+                "v5",
+                json.dumps(
+                    {"request.id": "req-legacy", "logger.name": "legacy.logger"}
+                ),
+                json.dumps(
+                    {
+                        "service.name": "order-api",
+                        "deployment.environment.name": "prod",
+                        "deployment.version": "deploy-5",
+                    }
+                ),
+                "{}",
+                "otlp",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    store = LocalObservabilityStore(database)
+    LocalObservabilityStore(database)  # migration is restart-idempotent
+    rows = store.search_logs(request_id="req-legacy")
+
+    assert len(rows) == 1
+    assert rows[0]["environment"] == "prod"
+    assert rows[0]["deployment_version"] == "deploy-5"
+    assert rows[0]["logger"] == "legacy.logger"
+    assert len(rows[0]["template_id"]) == 64
+
+
+def test_concurrent_otlp_ingest_sequences_are_unique(tmp_path: Path) -> None:
+    store = LocalObservabilityStore(tmp_path / "observability.sqlite3")
+
+    def ingest(index: int) -> int:
+        return store.ingest_otlp_logs(
+            _diagnosis_log_payload(
+                body=f"concurrent log {index}", timestamp_ns=10_000 + index
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        inserted = list(executor.map(ingest, range(16)))
+
+    rows = store.search_logs(service_name="order-api", limit=1000)
+    sequences = [row["ingest_sequence"] for row in rows]
+    assert inserted == [1] * 16
+    assert len(sequences) == 16
+    assert len(set(sequences)) == 16
 
 
 def test_invalid_otlp_trace_identifier_is_rejected(tmp_path: Path) -> None:

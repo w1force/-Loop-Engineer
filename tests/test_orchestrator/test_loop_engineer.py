@@ -12,10 +12,19 @@ from pathlib import Path
 
 import pytest
 
-from core.contracts.diagnosis import DiagnosisProposal, ProposedFailureSignature, ProposedSourceLocation
+from core.contracts.diagnosis import (
+    DiagnosisProposal,
+    ProposedFailureSignature,
+    ProposedSourceLocation,
+)
+from core.contracts.evidence import ReproductionAssessment, ReproductionDisposition
 from core.contracts.repair import RepairCycleRequest, RepairResult
 from core.orchestrator.loop_engineer import LoopEngineer, LoopRunRequest, _RepairStageAgent
-from core.stages.diagnosis import DiagnosisRequest, IncidentFreezer
+from core.stages.diagnosis import (
+    DiagnosisRequest,
+    IncidentFreezer,
+    diagnosis_hypothesis_digest,
+)
 from core.verification.coordinator import CoordinatorOutcome, CoordinatorStatus
 from core.verification.workflow import ArtifactReference
 
@@ -76,6 +85,18 @@ class _StubCoordinator:
             status=CoordinatorStatus.VERIFIED,
             cycle=1,
             evidence_location="file:///evidence/report",
+            candidate_ref="candidate:test",
+            candidate_digest="c" * 64,
+        )
+
+
+class _ReproducedControl:
+    async def assess(self, request):
+        return ReproductionAssessment(
+            attempt=request.attempt,
+            disposition=ReproductionDisposition.REPRODUCED,
+            summary="control reproduced",
+            hypothesis_digest=diagnosis_hypothesis_digest(request.proposal),
         )
 
 
@@ -103,6 +124,7 @@ async def test_loop_engineer_runs_diagnosis_then_coordinator(tmp_path: Path) -> 
         tracer=object(),
         lightweight_verifier=object(),
         planner=object(),
+        control_reproducer=_ReproducedControl(),
     )
 
     assert diagnosis.calls == 1
@@ -118,6 +140,7 @@ async def test_loop_engineer_runs_diagnosis_then_coordinator(tmp_path: Path) -> 
     assert isinstance(adapters["repair_agent"], _RepairStageAgent)
     assert outcome.verified is True
     assert outcome.incident_digest == coord_request.incident.digest
+    assert outcome.reproduction_disposition is ReproductionDisposition.REPRODUCED
 
 
 @pytest.mark.asyncio
@@ -163,3 +186,152 @@ async def test_repair_stage_adapter_converts_prior_failures_to_findings(
 def _make_incident(tmp_path: Path):
     request = _diagnosis_request(tmp_path)
     return IncidentFreezer().freeze(_proposal(), request=request)
+
+
+@pytest.mark.asyncio
+async def test_loop_engineer_rediagnoses_then_proceeds_after_control_reproduces(
+    tmp_path: Path,
+) -> None:
+    proposals = (
+        _proposal(),
+        _proposal().model_copy(update={"root_cause": "timeout budget is truncated"}),
+    )
+
+    class SequenceDiagnosis:
+        def __init__(self):
+            self.requests = []
+
+        async def run(self, request, **_):
+            self.requests.append(request)
+            return proposals[len(self.requests) - 1]
+
+    class Reproducer:
+        def __init__(self):
+            self.calls = 0
+
+        async def assess(self, request):
+            self.calls += 1
+            disposition = (
+                ReproductionDisposition.NON_REPRODUCIBLE
+                if self.calls == 1
+                else ReproductionDisposition.REPRODUCED
+            )
+            return ReproductionAssessment(
+                attempt=request.attempt,
+                disposition=disposition,
+                summary=disposition.value,
+                hypothesis_digest=diagnosis_hypothesis_digest(request.proposal),
+            )
+
+    diagnosis = SequenceDiagnosis()
+    coordinator = _StubCoordinator()
+    engine = LoopEngineer(
+        diagnosis_stage=diagnosis,
+        incident_freezer=IncidentFreezer(),
+        repair_stage=object(),
+        coordinator=coordinator,
+    )
+    request = LoopRunRequest(
+        run_id="run-rediagnose",
+        diagnosis=_diagnosis_request(tmp_path),
+        candidate_workspace=str(tmp_path / "candidate"),
+    )
+    (tmp_path / "candidate").mkdir()
+
+    outcome = await engine.run(
+        request,
+        parent_agent_state=object(),
+        parent_params=object(),
+        tracer=object(),
+        lightweight_verifier=object(),
+        planner=object(),
+        control_reproducer=Reproducer(),
+    )
+
+    assert len(diagnosis.requests) == 2
+    assert len(diagnosis.requests[1].previous_attempts) == 1
+    assert len(coordinator.calls) == 1
+    assert outcome.status is CoordinatorStatus.VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_duplicate_signal_stops_before_repair(tmp_path: Path) -> None:
+    class DuplicateReproducer:
+        async def assess(self, request):
+            return ReproductionAssessment(
+                attempt=request.attempt,
+                disposition=ReproductionDisposition.DUPLICATE,
+                summary="already handled by a verified incident",
+                evidence_refs=("incident://old",),
+                hypothesis_digest=diagnosis_hypothesis_digest(request.proposal),
+            )
+
+    coordinator = _StubCoordinator()
+    engine = LoopEngineer(
+        diagnosis_stage=_StubDiagnosisStage(_proposal()),
+        incident_freezer=IncidentFreezer(),
+        repair_stage=object(),
+        coordinator=coordinator,
+    )
+    request = LoopRunRequest(
+        run_id="run-duplicate",
+        diagnosis=_diagnosis_request(tmp_path),
+        candidate_workspace=str(tmp_path / "candidate"),
+    )
+    (tmp_path / "candidate").mkdir()
+
+    outcome = await engine.run(
+        request,
+        parent_agent_state=object(),
+        parent_params=object(),
+        tracer=object(),
+        lightweight_verifier=object(),
+        planner=object(),
+        control_reproducer=DuplicateReproducer(),
+    )
+
+    assert outcome.status is CoordinatorStatus.NO_ACTION
+    assert outcome.reproduction_disposition is ReproductionDisposition.DUPLICATE
+    assert coordinator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_level_diagnosis_budget_never_falls_through_to_repair(
+    tmp_path: Path,
+) -> None:
+    class NonReproducer:
+        async def assess(self, request):
+            return ReproductionAssessment(
+                attempt=request.attempt,
+                disposition=ReproductionDisposition.NON_REPRODUCIBLE,
+                summary="control did not reproduce",
+                hypothesis_digest=diagnosis_hypothesis_digest(request.proposal),
+            )
+
+    coordinator = _StubCoordinator()
+    engine = LoopEngineer(
+        diagnosis_stage=_StubDiagnosisStage(_proposal()),
+        incident_freezer=IncidentFreezer(),
+        repair_stage=object(),
+        coordinator=coordinator,
+    )
+    request = LoopRunRequest(
+        run_id="run-budget",
+        diagnosis=_diagnosis_request(tmp_path),
+        candidate_workspace=str(tmp_path / "candidate"),
+        max_diagnosis_attempts=1,
+    )
+    (tmp_path / "candidate").mkdir()
+
+    outcome = await engine.run(
+        request,
+        parent_agent_state=object(),
+        parent_params=object(),
+        tracer=object(),
+        lightweight_verifier=object(),
+        planner=object(),
+        control_reproducer=NonReproducer(),
+    )
+
+    assert outcome.status is CoordinatorStatus.ESCALATED
+    assert coordinator.calls == []
